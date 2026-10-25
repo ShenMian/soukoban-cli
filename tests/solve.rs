@@ -1,6 +1,7 @@
 //! Integration tests for the `solve` command.
 
 use std::{
+    fs,
     io::{BufRead as _, BufReader, Write as _},
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
@@ -549,6 +550,13 @@ fn parallel_runs_keep_the_selection_order() {
 
 #[test]
 fn parallel_progress_shows_the_run_totals_and_a_line_per_worker() {
+    // The bar only advances when a level finishes, so the run must keep one
+    // level alive while the others complete: otherwise a level-finishing draw
+    // may never land before the display is cleared (the run is far shorter
+    // than the redraw interval), and no filled cell would be captured.
+    let mut input = large_open_level(200);
+    input.push('\n');
+    input.push_str(&fs::read_to_string(fixture("basic.xsb")).expect("the fixture is readable"));
     let output = Command::cargo_bin("soukoban")
         .expect("the binary is built")
         .args([
@@ -559,8 +567,11 @@ fn parallel_progress_shows_the_run_totals_and_a_line_per_worker() {
             "solve",
             "-j",
             "4",
+            "--timeout",
+            "1s",
+            "-",
         ])
-        .arg(fixture("basic.xsb"))
+        .write_stdin(input)
         .output()
         .expect("the command runs");
 

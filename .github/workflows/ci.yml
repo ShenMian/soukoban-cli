@@ -25,15 +25,18 @@ jobs:
 
       # Lint on stable; rustfmt.toml relies on nightly-only options such as
       # wrap_comments, so formatting is checked with the nightly toolchain.
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
+      # Nightly is installed first so that stable stays the default toolchain
+      # (the cache key and the implicit `cargo` calls follow it), and both
+      # commands name their toolchain instead of relying on that default.
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -42,7 +45,7 @@ jobs:
         run: cargo +nightly fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo +stable clippy --all-targets --all-features -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})
