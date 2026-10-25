@@ -1,0 +1,32 @@
+[package]
+name = "soukoban-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "A command line tool for the soukoban library"
+repository = "https://github.com/shenmian/soukoban-cli"
+exclude = ["/assets", "/docs"]
+
+[[bin]]
+name = "soukoban"
+path = "src/main.rs"
+
+[dependencies]
+soukoban = { git = "https://github.com/ShenMian/soukoban" }
+
+anstream = "1"
+anstyle = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+console = "0.16"
+ctrlc = "3"
+indicatif = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-width = "0.2"
+
+[dev-dependencies]
+assert_cmd = "2"
+insta = { version = "1", features = ["filters"] }
+predicates = "3"

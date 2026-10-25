@@ -1,0 +1,12 @@
+---
+source: tests/solve.rs
+expression: contents
+---
+Stuck · A* · quick
+╭────────╮
+│ ###### │
+│ #@$  # │
+│ #   .# │
+│ ###### │
+╰────────╯
+✗ no solution

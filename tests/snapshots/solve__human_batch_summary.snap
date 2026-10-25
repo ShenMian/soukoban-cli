@@ -1,0 +1,5 @@
+---
+source: tests/solve.rs
+expression: contents
+---
+5 levels · 3 solved · [elapsed] · avg [elapsed]/level

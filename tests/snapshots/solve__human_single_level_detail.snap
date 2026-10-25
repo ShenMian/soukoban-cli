@@ -1,0 +1,13 @@
+---
+source: tests/solve.rs
+expression: contents
+---
+First · A* · quick
+╭───────╮
+│ ##### │
+│ #@$.# │
+│ ##### │
+╰───────╯
+✓ solved in [elapsed] · 1 push · 1 move
+  box lines 1 · box changes 0 · pushing sessions 1 · player lines 1
+R

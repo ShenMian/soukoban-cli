@@ -1,0 +1,11 @@
+---
+source: tests/solve.rs
+expression: contents
+---
+No Solution · A* · quick
+╭─────────╮
+│ ####### │
+│ #@$$..# │
+│ ####### │
+╰─────────╯
+✗ no solution
