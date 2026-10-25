@@ -1,6 +1,6 @@
 # soukoban-cli
 
-[![CI status](https://img.shields.io/github/actions/workflow/status/ShenMian/soukoban-cli/ci.yml?label=ci)](https://github.com/ShenMian/soukoban-cli/actions/workflows/ci.yml)
+[![CI status](https://img.shields.io/github/actions/workflow/status/ShenMian/soukoban-cli/ci.yml?label=CI)](https://github.com/ShenMian/soukoban-cli/actions/workflows/ci.yml)
 
 A command line tool for the [soukoban] library.
 
