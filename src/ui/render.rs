@@ -7,6 +7,7 @@ use soukoban::{prelude::*, run_length::rle_encode};
 
 use crate::ui::{
     Ui,
+    progress::format_count,
     table::{self, Align, Cell, Column, Table},
     theme::Theme,
 };
@@ -57,6 +58,8 @@ pub struct SolveSummary {
     pub total: usize,
     /// The number of levels that are solved.
     pub solved: usize,
+    /// The nodes expanded by the searches of the run.
+    pub expansions: u64,
     /// The wall clock time of the whole run.
     pub elapsed: Duration,
 }
@@ -163,8 +166,8 @@ pub fn solve_table(ui: &mut Ui, reports: &[LevelReport<'_>]) -> io::Result<()> {
         Column::new("Status", Align::Left),
         Column::new("Pushes", Align::Right),
         Column::new("Moves", Align::Right),
+        Column::new("Nodes", Align::Right),
         Column::new("Time", Align::Right),
-        Column::new("Solution", Align::Left).shrinkable(),
     ]);
     for report in reports {
         let pushes = report
@@ -173,13 +176,12 @@ pub fn solve_table(ui: &mut Ui, reports: &[LevelReport<'_>]) -> io::Result<()> {
         let moves = report
             .actions
             .map_or_else(|| "-".to_string(), |actions| actions.moves().to_string());
+        let nodes = report
+            .stats
+            .map_or_else(|| "-".to_string(), |stats| format_count(stats.expansions));
         let time = report
             .stats
             .map_or_else(|| "-".to_string(), |stats| format_elapsed(stats.elapsed));
-        let solution = report
-            .actions
-            .filter(|actions| !actions.is_empty())
-            .map_or_else(|| "-".to_string(), encode_actions);
         table.push_row([
             Cell::new(report.number.to_string()),
             Cell::new(report.title),
@@ -189,8 +191,8 @@ pub fn solve_table(ui: &mut Ui, reports: &[LevelReport<'_>]) -> io::Result<()> {
             ),
             Cell::new(pushes),
             Cell::new(moves),
+            Cell::new(nodes),
             Cell::new(time),
-            Cell::new(solution),
         ]);
     }
     table.render(ui, table::terminal_width())
@@ -206,12 +208,14 @@ pub fn solve_summary(ui: &mut Ui, summary: &SolveSummary) -> io::Result<()> {
     };
     // An interrupted run processes only part of the levels; average over those.
     let average = summary.elapsed / summary.processed as u32;
+    let nodes = summary.expansions / summary.processed as u64;
     writeln!(
         ui.err(),
-        "{style}{levels} · {} solved · {} · avg {}/level{style:#}",
+        "{style}{levels} · {} solved · {} · avg {}/level · avg {} nodes/level{style:#}",
         summary.solved,
         format_elapsed(summary.elapsed),
-        format_elapsed(average)
+        format_elapsed(average),
+        format_count(nodes)
     )
 }
 

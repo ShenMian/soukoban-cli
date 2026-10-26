@@ -494,6 +494,10 @@ fn render_results(
                         )
                     })
                     .count(),
+                expansions: reports
+                    .iter()
+                    .filter_map(|report| report.stats.map(|stats| stats.expansions))
+                    .sum(),
                 elapsed,
             },
         )?;

@@ -2,4 +2,4 @@
 source: tests/solve.rs
 expression: contents
 ---
-5 levels · 3 solved · [elapsed] · avg [elapsed]/level
+5 levels · 3 solved · [elapsed] · avg [elapsed]/level · avg 1 nodes/level

@@ -215,24 +215,6 @@ fn human_batch_table() {
 }
 
 #[test]
-fn human_table_compresses_solutions() {
-    let output = command()
-        .args(["solve"])
-        .arg(fixture("runs.xsb"))
-        .output()
-        .expect("the command runs");
-
-    assert_eq!(output.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("5R"), "push runs must be compressed");
-    assert!(stdout.contains("r2R"), "mixed solutions must be compressed");
-    assert!(
-        !stdout.contains("RRRRR"),
-        "the uncompressed solution must not be shown"
-    );
-}
-
-#[test]
 fn human_detail_compresses_solutions() {
     let output = command()
         .args(["solve", "--level", "1"])

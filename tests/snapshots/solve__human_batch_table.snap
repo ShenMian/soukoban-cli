@@ -2,9 +2,9 @@
 source: tests/solve.rs
 expression: contents
 ---
-#  Title        Status          Pushes  Moves    Time  Solution
-1  First        solved               1      1  [elapsed]  R
-2  No Solution  unsolved             -      -  [elapsed]  -
-3  Done         already solved       -      -       -  -
-4  Stuck        unsolved             -      -  [elapsed]  -
-5  仓库         solved               1      1  [elapsed]  R
+#  Title        Status          Pushes  Moves  Nodes    Time
+1  First        solved               1      1      2  [elapsed]
+2  No Solution  unsolved             -      -      1  [elapsed]
+3  Done         already solved       -      -      -       -
+4  Stuck        unsolved             -      -      0  [elapsed]
+5  仓库         solved               1      1      2  [elapsed]
