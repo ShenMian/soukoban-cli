@@ -31,9 +31,10 @@ const DEFAULT_ROWS: usize = 24;
 /// The template of the batch line.
 const BATCH_TEMPLATE: &str = "{spinner} {bar:14} {pos:>4}/{len} · {msg}";
 /// The template of a single level, which has no batch position.
-const SINGLE_TEMPLATE: &str = "{spinner} {msg}";
-/// The template of a worker line, which has no spinner of its own.
-const WORKER_TEMPLATE: &str = "{msg}";
+const SINGLE_TEMPLATE: &str = "{spinner} {bar:14} · {msg}";
+/// The template of a level line below the batch line, which has no spinner of
+/// its own.
+const LEVEL_TEMPLATE: &str = "  {bar:14} · {msg}";
 
 /// The width of the level number in a progress message.
 const LEVEL_WIDTH: usize = 4;
@@ -81,20 +82,24 @@ fn forced(ui: &Ui) -> bool {
 /// A progress display that becomes a no-op when progress reporting is
 /// disabled.
 ///
-/// A run has one batch line, which reports the level that is currently solved
-/// (or the totals of the run when several levels are solved at once), and one
-/// line per worker below it during a parallel run.
+/// A run over several levels has one batch line with the totals of the run and
+/// one line per level below it: a single line in a sequential run, and one line
+/// per worker during a parallel run. Each level line carries a bar of the
+/// heuristic progress of its level. A run over a single level shows that line
+/// alone.
 pub struct Progress {
-    /// The display of a parallel run. It owns the batch line and the lines of
-    /// its workers.
+    /// The display of a run over several levels. It owns the batch line and the
+    /// lines of its levels.
     multi: Option<MultiProgress>,
     /// The batch line.
-    bar: Option<ProgressBar>,
-    /// The style of the worker lines.
+    batch: Option<ProgressBar>,
+    /// The line of a run over a single level.
+    single: Option<ProgressBar>,
+    /// The style of the level lines.
     line_style: ProgressStyle,
-    /// The number of worker lines that fit below the batch line.
+    /// The number of level lines that fit below the batch line.
     lanes: usize,
-    /// Expanded nodes of all workers.
+    /// Expanded nodes of all levels.
     expansions: Arc<AtomicU64>,
     /// When the run started.
     started: Instant,
@@ -106,8 +111,9 @@ impl Progress {
     pub fn new(ui: &Ui, enabled: bool, total: u64, jobs: usize) -> Self {
         let mut progress = Self {
             multi: None,
-            bar: None,
-            line_style: style(ui, WORKER_TEMPLATE),
+            batch: None,
+            single: None,
+            line_style: style(ui, LEVEL_TEMPLATE),
             lanes: 0,
             expansions: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
@@ -115,45 +121,39 @@ impl Progress {
         if !enabled {
             return progress;
         }
-        let template = if total > 1 {
-            BATCH_TEMPLATE
-        } else {
-            SINGLE_TEMPLATE
-        };
         let target = draw_target(ui);
-        if jobs > 1 {
+        if total > 1 {
             let multi = MultiProgress::with_draw_target(target);
-            let bar = multi.add(bar(ui, template, Some(total)));
+            let batch = multi.add(bar(ui, BATCH_TEMPLATE, Some(total)));
             // Spinners only advance with a steady tick; without one the
             // batch spinner would move once per finished level.
-            bar.enable_steady_tick(TICK_INTERVAL);
-            progress.lanes = jobs.min(worker_lanes());
+            batch.enable_steady_tick(TICK_INTERVAL);
+            progress.lanes = jobs.min(level_lanes());
             progress.multi = Some(multi);
-            progress.bar = Some(bar);
-            // Workers report their statistics only once a search starts.
+            progress.batch = Some(batch);
             progress.set_totals();
         } else {
-            let bar = bar(ui, template, Some(total));
-            bar.set_draw_target(target);
-            bar.enable_steady_tick(TICK_INTERVAL);
-            progress.bar = Some(bar);
+            let single = bar(ui, SINGLE_TEMPLATE, Some(1));
+            single.set_draw_target(target);
+            single.enable_steady_tick(TICK_INTERVAL);
+            progress.single = Some(single);
         }
         progress
     }
 
-    /// Creates a line for the worker at `index`.
+    /// Creates a line for the level solved in lane `index`.
     ///
     /// The line is removed from the display when the returned guard is dropped.
-    /// Workers beyond the lines that fit into the terminal get `None`; their
+    /// Lanes beyond the lines that fit into the terminal get `None`; their
     /// levels are still counted in the totals of the run.
-    pub fn worker_line(&self, index: usize) -> Option<WorkerLine> {
+    pub fn level_line(&self, index: usize) -> Option<LevelLine> {
         let multi = self.multi.clone()?;
         if index >= self.lanes {
             return None;
         }
-        let bar = ProgressBar::new_spinner();
+        let bar = ProgressBar::new(1);
         bar.set_style(self.line_style.clone());
-        Some(WorkerLine {
+        Some(LevelLine {
             bar: multi.add(bar),
             multi,
         })
@@ -162,42 +162,46 @@ impl Progress {
     /// Runs `f` while the display is suspended, so that output written by `f`
     /// is not overwritten by a redraw.
     pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
-        match (&self.multi, &self.bar) {
-            (Some(multi), _) => multi.suspend(f),
-            (None, Some(bar)) => bar.suspend(f),
-            (None, None) => f(),
+        if let Some(multi) = &self.multi {
+            multi.suspend(f)
+        } else if let Some(bar) = &self.single {
+            bar.suspend(f)
+        } else {
+            f()
         }
     }
 
-    /// Moves the bar to `completed`, the number of finished levels.
-    pub fn set_position(&self, completed: u64) {
-        if let Some(bar) = &self.bar {
+    /// Moves the batch bar to `completed`, the number of finished levels.
+    pub fn set_completed(&self, completed: u64) {
+        if let Some(bar) = &self.batch {
             bar.set_position(completed);
         }
     }
 
-    /// Updates the message of the batch line.
+    /// Updates the message of the single-level line.
     pub fn set_message(&self, message: String) {
-        if let Some(bar) = &self.bar {
+        if let Some(bar) = &self.single {
             bar.set_message(message);
         }
     }
 
     /// Stops the spinners and clears the progress display.
     pub fn finish(&self) {
-        // The ticker of the batch line keeps drawing until it is stopped.
-        if let Some(bar) = &self.bar {
+        // The tickers keep drawing until they are stopped.
+        if let Some(bar) = &self.batch {
             bar.disable_steady_tick();
+        }
+        if let Some(bar) = &self.single {
+            bar.disable_steady_tick();
+            bar.finish_and_clear();
         }
         if let Some(multi) = &self.multi {
             let _ = multi.clear();
-        } else if let Some(bar) = &self.bar {
-            bar.finish_and_clear();
         }
     }
 
     fn is_enabled(&self) -> bool {
-        self.bar.is_some()
+        self.batch.is_some() || self.single.is_some()
     }
 
     /// Adds expanded nodes to the run totals.
@@ -205,11 +209,26 @@ impl Progress {
         self.expansions.fetch_add(expansions, Ordering::Relaxed);
     }
 
+    /// Updates the single-level line with the level statistics and progress.
+    fn set_single(&self, message: String, best: i32, max: i32) {
+        let Some(bar) = &self.single else {
+            return;
+        };
+        bar.set_message(message);
+        if let Some((position, length)) = heuristic_position(best, max) {
+            bar.set_length(length);
+            bar.set_position(position);
+        }
+    }
+
     /// Updates the batch message with the run totals.
     fn set_totals(&self) {
+        let Some(bar) = &self.batch else {
+            return;
+        };
         let elapsed = self.started.elapsed();
         let expansions = self.expansions.load(Ordering::Relaxed);
-        self.set_message(format!(
+        bar.set_message(format!(
             "expanded {:>STAT_WIDTH$} · speed {:>STAT_WIDTH$}/s · elapsed {:>STAT_WIDTH$.1}s",
             format_count(expansions),
             format_count(rate(expansions, elapsed)),
@@ -225,25 +244,47 @@ impl Drop for Progress {
     }
 }
 
-/// A line of a worker in a parallel run.
+/// A line of a level in a run over several levels.
 ///
 /// The line is removed from the display when the guard is dropped.
-pub struct WorkerLine {
+pub struct LevelLine {
     bar: ProgressBar,
     multi: MultiProgress,
 }
 
-impl WorkerLine {
+impl LevelLine {
     /// Updates the message of the line.
     pub fn set_message(&self, message: String) {
         self.bar.set_message(message);
     }
+
+    /// Fills the bar to the heuristic progress of the level.
+    fn set_heuristic(&self, best: i32, max: i32) {
+        if let Some((position, length)) = heuristic_position(best, max) {
+            self.bar.set_length(length);
+            self.bar.set_position(position);
+        }
+    }
 }
 
-impl Drop for WorkerLine {
+impl Drop for LevelLine {
     fn drop(&mut self) {
         self.multi.remove(&self.bar);
     }
+}
+
+/// Maps the smallest heuristic value seen so far onto a bar.
+///
+/// The bar is filled to `1 - best / max`, where `max` is the heuristic of the
+/// initial node. Returns `None` while the search has not reported its initial
+/// value yet, which also covers searches that stop before they start, such as
+/// deadlocked levels.
+fn heuristic_position(best: i32, max: i32) -> Option<(u64, u64)> {
+    if max <= 0 {
+        return None;
+    }
+    let best = best.clamp(0, max);
+    Some(((max - best) as u64, max as u64))
 }
 
 /// Builds a progress style with the application glyphs.
@@ -272,8 +313,8 @@ fn draw_target(ui: &Ui) -> ProgressDrawTarget {
     }
 }
 
-/// Returns how many worker lines fit below the batch line.
-fn worker_lanes() -> usize {
+/// Returns how many level lines fit below the batch line.
+fn level_lanes() -> usize {
     let rows = Term::stderr()
         .size_checked()
         .map_or(DEFAULT_ROWS, |(rows, _)| usize::from(rows));
@@ -283,11 +324,10 @@ fn worker_lanes() -> usize {
 /// Where a [`SearchReporter`] writes its message.
 #[derive(Clone, Copy)]
 enum Target<'a> {
-    /// The batch line, used when levels are solved one at a time.
-    Batch,
-    /// The line of the worker that solves the level, used when levels are
-    /// solved in parallel.
-    Worker(Option<&'a WorkerLine>),
+    /// The line of a run over a single level.
+    Single,
+    /// A level line below the batch line.
+    Line(Option<&'a LevelLine>),
 }
 
 /// The observer that counts expanded nodes and updates the progress message.
@@ -300,19 +340,23 @@ pub struct SearchReporter<'a> {
     reported: u64,
     started: Instant,
     last_refresh: Instant,
+    /// The heuristic of the initial node; the length of the level bar.
+    max_heuristic: i32,
+    /// The smallest heuristic value seen so far.
+    best_heuristic: i32,
 }
 
 impl<'a> SearchReporter<'a> {
-    /// Creates a reporter that writes the statistics of the level numbered
-    /// `number` to the batch line.
-    pub fn level(progress: &'a Progress, number: usize) -> Self {
-        Self::new(progress, Target::Batch, number)
+    /// Creates a reporter that writes the statistics of the single level
+    /// numbered `number` to the line of the run.
+    pub fn single(progress: &'a Progress, number: usize) -> Self {
+        Self::new(progress, Target::Single, number)
     }
 
     /// Creates a reporter that writes the statistics of the level numbered
-    /// `number` to the line of a worker and feeds the run totals.
-    pub fn worker(progress: &'a Progress, line: Option<&'a WorkerLine>, number: usize) -> Self {
-        Self::new(progress, Target::Worker(line), number)
+    /// `number` to a level line and feeds the run totals.
+    pub fn line(progress: &'a Progress, line: Option<&'a LevelLine>, number: usize) -> Self {
+        Self::new(progress, Target::Line(line), number)
     }
 
     fn new(progress: &'a Progress, target: Target<'a>, number: usize) -> Self {
@@ -325,6 +369,8 @@ impl<'a> SearchReporter<'a> {
             reported: 0,
             started: now,
             last_refresh: now,
+            max_heuristic: 0,
+            best_heuristic: 0,
         }
     }
 
@@ -341,10 +387,14 @@ impl<'a> SearchReporter<'a> {
         let elapsed = self.started.elapsed();
         let message = level_message(self.number, self.expansions, elapsed);
         match self.target {
-            Target::Batch => self.progress.set_message(message),
-            Target::Worker(line) => {
+            Target::Single => {
+                self.progress
+                    .set_single(message, self.best_heuristic, self.max_heuristic);
+            }
+            Target::Line(line) => {
                 if let Some(line) = line {
                     line.set_message(message);
+                    line.set_heuristic(self.best_heuristic, self.max_heuristic);
                 }
                 if self.expansions > self.reported {
                     self.progress
@@ -358,16 +408,23 @@ impl<'a> SearchReporter<'a> {
 }
 
 impl Observer for SearchReporter<'_> {
-    fn on_search_start(&mut self, _root: &Node) {
+    fn on_search_start(&mut self, root: &Node) {
         self.started = Instant::now();
+        self.max_heuristic = root.heuristic();
+        self.best_heuristic = self.max_heuristic;
         self.refresh();
     }
 
-    fn on_node_expanded(&mut self, _node: &Node) {
+    fn on_node_expanded(&mut self, node: &Node) {
         self.expansions += 1;
+        self.best_heuristic = self.best_heuristic.min(node.heuristic());
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
             self.refresh();
         }
+    }
+
+    fn on_successor(&mut self, _parent: &Node, child: &Node) {
+        self.best_heuristic = self.best_heuristic.min(child.heuristic());
     }
 
     fn on_search_end(&mut self, _result: &Result<Actions, SearchError>) {
@@ -433,5 +490,15 @@ mod tests {
             level_message(155, 217_300, Duration::from_millis(2_500)),
             "#155  · expanded 217.3K · speed  86.9K/s · elapsed    2.5s"
         );
+    }
+
+    #[test]
+    fn maps_heuristics_onto_bars() {
+        // No initial value yet, e.g. a level that is deadlocked at the root.
+        assert_eq!(heuristic_position(0, 0), None);
+        assert_eq!(heuristic_position(0, 30), Some((30, 30)));
+        assert_eq!(heuristic_position(10, 30), Some((20, 30)));
+        assert_eq!(heuristic_position(30, 30), Some((0, 30)));
+        assert_eq!(heuristic_position(40, 30), Some((0, 30)));
     }
 }

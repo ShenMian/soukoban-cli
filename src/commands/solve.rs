@@ -141,6 +141,7 @@ fn solve_in_sequence<'a>(
 ) -> Result<(Vec<Processed<'a>>, bool)> {
     let total = selected.len();
     let bar = Progress::new(&ctx.ui, progress::enabled(&ctx.ui), total as u64, 1);
+    let line = bar.level_line(0);
     let mut processed = Vec::with_capacity(total);
     let mut interrupted = false;
 
@@ -152,8 +153,15 @@ fn solve_in_sequence<'a>(
         let level = parsed_level(&levels[index]);
         // Levels that are already solved do not start a search, so their
         // statistics are never reported.
-        bar.set_message(progress::level_label(index + 1));
-        let mut reporter = SearchReporter::level(&bar, index + 1);
+        if let Some(line) = &line {
+            line.set_message(progress::level_label(index + 1));
+        } else {
+            bar.set_message(progress::level_label(index + 1));
+        }
+        let mut reporter = match &line {
+            Some(line) => SearchReporter::line(&bar, Some(line), index + 1),
+            None => SearchReporter::single(&bar, index + 1),
+        };
         let outcome = match solve_level(level, args, &ctx.cancel, &mut reporter)? {
             Some(outcome) => outcome,
             None => {
@@ -164,7 +172,7 @@ fn solve_in_sequence<'a>(
         if matches!(outcome, Outcome::Solved { .. }) {
             bar.suspend(|| ctx.ui.debug("solution replay verified"))?;
         }
-        bar.set_position(processed.len() as u64 + 1);
+        bar.set_completed(processed.len() as u64 + 1);
         processed.push(Processed {
             index,
             title: resolve_title(level, name, index),
@@ -209,7 +217,7 @@ fn solve_in_parallel<'a>(
             scope.spawn(move || {
                 // The line of this worker; it is removed when the worker runs
                 // out of levels or is cancelled.
-                let line = bar.worker_line(worker);
+                let line = bar.level_line(worker);
                 while !cancel.is_requested() {
                     let position = next.fetch_add(1, Ordering::Relaxed);
                     let Some(&index) = selected.get(position) else {
@@ -219,7 +227,7 @@ fn solve_in_parallel<'a>(
                     if let Some(line) = &line {
                         line.set_message(progress::level_label(index + 1));
                     }
-                    let mut reporter = SearchReporter::worker(bar, line.as_ref(), index + 1);
+                    let mut reporter = SearchReporter::line(bar, line.as_ref(), index + 1);
                     let outcome = match solve_level(level, args, &cancel, &mut reporter) {
                         Ok(Some(outcome)) => outcome,
                         // Stopped by the user; the level is not reported.
@@ -254,7 +262,7 @@ fn solve_in_parallel<'a>(
                         outcome,
                     });
                     completed += 1;
-                    bar.set_position(completed);
+                    bar.set_completed(completed);
                 }
                 Err(error) => {
                     // Stop the remaining workers; their levels are not

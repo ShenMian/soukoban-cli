@@ -462,7 +462,7 @@ fn batch_progress_shows_the_overall_bar() {
 }
 
 #[test]
-fn single_level_progress_has_no_bar() {
+fn single_level_progress_shows_the_heuristic_bar() {
     let output = Command::cargo_bin("soukoban")
         .expect("the binary is built")
         .args([
@@ -485,7 +485,10 @@ fn single_level_progress_has_no_bar() {
         !stderr.contains("1/1"),
         "single levels show no batch position"
     );
-    assert!(!stderr.contains('█'), "single levels use a plain spinner");
+    assert!(
+        stderr.contains('█'),
+        "the level bar fills up as the heuristic drops"
+    );
 }
 
 #[test]
