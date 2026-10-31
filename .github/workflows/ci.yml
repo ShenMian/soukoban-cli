@@ -4,30 +4,32 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
 
 jobs:
   lint:
     name: Lint (fmt + clippy)
     runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
+    timeout-minutes: 20
 
-      # Lint on stable; rustfmt.toml relies on nightly-only options such as
-      # wrap_comments, so formatting is checked with the nightly toolchain.
-      # Nightly is installed first so that stable stays the default toolchain
-      # (the cache key and the implicit `cargo` calls follow it), and both
-      # commands name their toolchain instead of relying on that default.
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # rustfmt.toml uses nightly-only options; install nightly first so stable stays default.
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
@@ -45,18 +47,22 @@ jobs:
         run: cargo +nightly fmt --all -- --check
 
       - name: Run clippy
-        run: cargo +stable clippy --all-targets --all-features -- -D warnings
+        run: cargo +stable clippy --locked --workspace --all-targets --all-features -- --deny warnings
 
   test:
     name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -65,4 +71,26 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked --workspace --all-features --all-targets
+
+  doc:
+    name: Docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: --deny warnings
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check documentation
+        run: cargo doc --locked --workspace --all-features --document-private-items --no-deps
