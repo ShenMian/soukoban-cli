@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Context as _;
 use serde::Serialize;
-use soukoban::{deadlock::compute_deadlocked_boxes, prelude::*};
+use soukoban::prelude::*;
 
 use crate::{
     app::{Cancellation, Ctx},
@@ -283,18 +283,10 @@ fn is_xsb(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("xsb"))
 }
 
-/// Returns the canonical form of a map, or an exact copy when canonicalization
-/// is unsafe.
-///
-/// `Map::canonicalize` assumes that every deadlocked box is on a goal.
+/// Returns the canonical form of a map.
 fn canonical_map(map: &Map) -> Map {
     let mut map = map.clone();
-    if map
-        .goal_positions()
-        .is_superset(&compute_deadlocked_boxes(&map))
-    {
-        map.canonicalize();
-    }
+    map.canonicalize();
     map
 }
 

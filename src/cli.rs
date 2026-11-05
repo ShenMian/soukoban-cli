@@ -172,7 +172,7 @@ impl From<Algorithm> for soukoban::solver::Algorithm {
     fn from(algorithm: Algorithm) -> Self {
         match algorithm {
             Algorithm::Astar => Self::AStar,
-            Algorithm::IdaStar => Self::IDAStar,
+            Algorithm::IdaStar => Self::IdaStar,
             Algorithm::Bfs => Self::Bfs,
         }
     }

@@ -11,10 +11,7 @@ use std::{
 
 use console::Term;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use soukoban::{
-    prelude::{Actions, SearchError},
-    solver::{Node, Observer},
-};
+use soukoban::solver::{Node, Observer};
 
 use crate::cli::ProgressChoice;
 
@@ -216,8 +213,10 @@ impl Progress {
         };
         bar.set_message(message);
         if let Some((position, length)) = heuristic_position(best, max) {
-            bar.set_length(length);
+            // The position must be set first: `set_length` redraws the bar,
+            // while `set_position` defers to the steady tick.
             bar.set_position(position);
+            bar.set_length(length);
         }
     }
 
@@ -261,8 +260,10 @@ impl LevelLine {
     /// Fills the bar to the heuristic progress of the level.
     fn set_heuristic(&self, best: i32, max: i32) {
         if let Some((position, length)) = heuristic_position(best, max) {
-            self.bar.set_length(length);
+            // The position must be set first: `set_length` redraws the bar,
+            // while `set_position` defers to the steady tick.
             self.bar.set_position(position);
+            self.bar.set_length(length);
         }
     }
 }
@@ -408,14 +409,14 @@ impl<'a> SearchReporter<'a> {
 }
 
 impl Observer for SearchReporter<'_> {
-    fn on_search_start(&mut self, root: &Node) {
-        self.started = Instant::now();
-        self.max_heuristic = root.heuristic();
-        self.best_heuristic = self.max_heuristic;
-        self.refresh();
-    }
-
     fn on_node_expanded(&mut self, node: &Node) {
+        // The root is the first expanded node: it sets the length of the bar
+        // and starts the elapsed time.
+        if self.expansions == 0 {
+            self.started = Instant::now();
+            self.max_heuristic = node.heuristic();
+            self.best_heuristic = self.max_heuristic;
+        }
         self.expansions += 1;
         self.best_heuristic = self.best_heuristic.min(node.heuristic());
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
@@ -426,8 +427,10 @@ impl Observer for SearchReporter<'_> {
     fn on_successor(&mut self, _parent: &Node, child: &Node) {
         self.best_heuristic = self.best_heuristic.min(child.heuristic());
     }
+}
 
-    fn on_search_end(&mut self, _result: &Result<Actions, SearchError>) {
+impl Drop for SearchReporter<'_> {
+    fn drop(&mut self) {
         // Show the final statistics of the level until the next one starts.
         self.refresh();
     }
