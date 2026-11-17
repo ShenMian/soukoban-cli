@@ -41,7 +41,11 @@ impl fmt::Display for WithHint {
     }
 }
 
-impl Error for WithHint {}
+impl Error for WithHint {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.error.source()
+    }
+}
 
 /// Renders an error chain to stderr.
 pub fn render(error: &anyhow::Error, ui: &mut Ui) -> io::Result<()> {
@@ -49,26 +53,19 @@ pub fn render(error: &anyhow::Error, ui: &mut Ui) -> io::Result<()> {
     let label = ui.theme().label;
     let accent = ui.theme().accent;
 
-    let mut hint = None;
-    let mut messages = Vec::new();
-    for cause in error.chain() {
-        match cause.downcast_ref::<WithHint>() {
-            Some(with_hint) => {
-                hint = Some(with_hint.hint.as_str());
-                messages.extend(with_hint.error.chain().map(|cause| cause.to_string()));
-            }
-            None => messages.push(cause.to_string()),
-        }
-    }
+    let hint = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<WithHint>())
+        .map(|with_hint| with_hint.hint.as_str());
 
     let writer = ui.err();
-    let mut messages = messages.into_iter();
-    let head = messages
+    let mut chain = error.chain();
+    let head = chain
         .next()
-        .unwrap_or_else(|| "unknown error".to_string());
+        .map_or_else(|| "unknown error".to_string(), ToString::to_string);
     writeln!(writer, "{style}error{style:#}: {head}")?;
-    for message in messages {
-        writeln!(writer, "  {label}caused by{label:#}: {message}")?;
+    for cause in chain {
+        writeln!(writer, "  {label}caused by{label:#}: {cause}")?;
     }
     if let Some(hint) = hint {
         writeln!(writer, "  {accent}help{accent:#}: {hint}")?;
@@ -88,4 +85,46 @@ pub fn is_broken_pipe(error: &anyhow::Error) -> bool {
 /// Maps a runtime error to a process exit code.
 pub fn map_error(_error: &anyhow::Error) -> ExitCode {
     ExitCode::from(EXIT_ERROR)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{cli::Format, ui::theme::Glyphs};
+
+    use super::*;
+
+    #[test]
+    fn renders_causes_and_hints_across_context_layers() {
+        let inner = io::Error::new(io::ErrorKind::NotFound, "file missing");
+        let error = with_hint(
+            anyhow::Error::new(inner).context("failed to read `levels.xsb`"),
+            "check the path",
+        )
+        .context("could not load input");
+
+        let mut ui = Ui::buffered(Format::Human, Glyphs::Ascii);
+        render(&error, &mut ui).expect("rendering succeeds");
+        let (out, err) = ui.into_parts();
+        assert_eq!(out, "");
+        assert_eq!(
+            err,
+            "error: could not load input\n  \
+             caused by: failed to read `levels.xsb`\n  \
+             caused by: file missing\n  \
+             help: check the path\n"
+        );
+    }
+
+    #[test]
+    fn detects_broken_pipes_through_hints_and_contexts() {
+        let pipe = io::Error::from(io::ErrorKind::BrokenPipe);
+        let error = with_hint(
+            anyhow::Error::new(pipe).context("write failed"),
+            "try again",
+        );
+        assert!(is_broken_pipe(&error));
+
+        let other = with_hint(anyhow::anyhow!("invalid map"), "check the file");
+        assert!(!is_broken_pipe(&other));
+    }
 }

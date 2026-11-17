@@ -1,6 +1,7 @@
 //! Input reading and level selection.
 
 use std::{
+    ffi::OsString,
     fmt::{self, Display},
     fs,
     io::{self, Read as _},
@@ -8,8 +9,12 @@ use std::{
 };
 
 use anyhow::Context as _;
+use soukoban::prelude::*;
 
-use crate::error::with_hint;
+use crate::{
+    error::{Result, with_hint},
+    ui::render::describe_count,
+};
 
 /// A level input source.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,15 +26,6 @@ pub enum Input {
 }
 
 impl Input {
-    /// Parses a command line argument; `-` selects the standard input.
-    pub fn parse(text: &str) -> std::result::Result<Self, String> {
-        Ok(if text == "-" {
-            Self::Stdin
-        } else {
-            Self::File(PathBuf::from(text))
-        })
-    }
-
     /// Returns a short human readable name of the input.
     pub fn display_name(&self) -> String {
         match self {
@@ -42,8 +38,24 @@ impl Input {
     }
 }
 
+impl From<OsString> for Input {
+    fn from(value: OsString) -> Self {
+        if value == "-" {
+            Self::Stdin
+        } else {
+            Self::File(PathBuf::from(value))
+        }
+    }
+}
+
+impl From<&str> for Input {
+    fn from(value: &str) -> Self {
+        OsString::from(value).into()
+    }
+}
+
 /// Reads an input source into a string.
-pub fn read(input: &Input) -> anyhow::Result<String> {
+pub fn read(input: &Input) -> Result<String> {
     match input {
         Input::Stdin => {
             let mut text = String::new();
@@ -58,6 +70,87 @@ pub fn read(input: &Input) -> anyhow::Result<String> {
             .with_context(|| format!("failed to read `{}`", path.display()))
             .map_err(|error| with_hint(error, "check the path, or use `-` to read from stdin")),
     }
+}
+
+/// A parsed level selected from an input source.
+#[derive(Clone, Debug)]
+pub struct SelectedLevel {
+    /// The 0-based index of the level in the input.
+    pub index: usize,
+    /// The display title of the level.
+    pub title: String,
+    /// The parsed level.
+    pub level: Level,
+}
+
+impl SelectedLevel {
+    /// Returns the 1-based number of the level in the input.
+    pub const fn number(&self) -> usize {
+        self.index + 1
+    }
+}
+
+/// Reads `input`, resolves `spec`, and parses every selected level.
+pub fn load_levels(input: &Input, spec: &LevelSpec) -> Result<Vec<SelectedLevel>> {
+    let text = read(input)?;
+    let name = input.display_name();
+    let count = Level::load_from_str(&text).count();
+
+    if count == 0 {
+        return Err(with_hint(
+            anyhow::anyhow!("no levels found in `{name}`"),
+            "check that the input is a valid XSB file",
+        ));
+    }
+
+    let indices = spec.select(count).map_err(|error| {
+        with_hint(
+            anyhow::Error::new(error),
+            format!("the input has {}", describe_count(count, "level", "levels")),
+        )
+    })?;
+
+    let mut slots: Vec<Option<std::result::Result<Level, ParseLevelError>>> =
+        (0..count).map(|_| None).collect();
+    let mut sorted = indices.clone();
+    sorted.sort_unstable();
+
+    let mut iter = Level::load_from_str(&text);
+    let mut cursor = 0;
+    for index in sorted {
+        let result = iter
+            .nth(index - cursor)
+            .expect("selected index is within bounds");
+        slots[index] = Some(result);
+        cursor = index + 1;
+    }
+
+    let mut selected = Vec::with_capacity(indices.len());
+    for index in indices {
+        let result = slots[index]
+            .take()
+            .expect("selected indices are unique and parsed");
+        let level = result.map_err(|error| {
+            anyhow::Error::new(error)
+                .context(format!("failed to parse level {} of `{name}`", index + 1))
+        })?;
+        let title = resolve_title(&level, &name, index);
+        selected.push(SelectedLevel {
+            index,
+            title,
+            level,
+        });
+    }
+    Ok(selected)
+}
+
+/// Returns the display title of a level.
+pub fn resolve_title(level: &Level, input_name: &str, index: usize) -> String {
+    level
+        .metadata()
+        .get("title")
+        .cloned()
+        .unwrap_or_else(|| format!("{input_name} #{}", index + 1))
 }
 
 /// One segment of a level selection.
@@ -94,6 +187,7 @@ impl LevelSpec {
             return Ok((0..count).collect());
         }
         let mut selected = Vec::new();
+        let mut seen = vec![false; count];
         for &segment in &self.segments {
             let (start, end) = match segment {
                 Segment::Single(level) => (level, level),
@@ -104,7 +198,8 @@ impl LevelSpec {
             }
             for level in start..=end {
                 let index = level - 1;
-                if !selected.contains(&index) {
+                if !seen[index] {
+                    seen[index] = true;
                     selected.push(index);
                 }
             }
@@ -242,14 +337,21 @@ mod tests {
 
     #[test]
     fn displays_input_names() {
-        assert_eq!(Input::parse("-").unwrap().display_name(), "stdin");
-        assert_eq!(
-            Input::parse("levels.xsb").unwrap().display_name(),
-            "levels.xsb"
-        );
-        assert_eq!(
-            Input::parse("dir/levels.xsb").unwrap().display_name(),
-            "levels.xsb"
-        );
+        assert_eq!(Input::from("-").display_name(), "stdin");
+        assert_eq!(Input::from("levels.xsb").display_name(), "levels.xsb");
+        assert_eq!(Input::from("dir/levels.xsb").display_name(), "levels.xsb");
+    }
+
+    #[test]
+    fn loads_only_selected_levels_in_requested_order() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("basic.xsb");
+        let loaded = load_levels(&Input::File(path), &spec("3,1")).expect("levels load");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].number(), 3);
+        assert_eq!(loaded[1].number(), 1);
+        assert_eq!(loaded[1].title, "First");
     }
 }

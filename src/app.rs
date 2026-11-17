@@ -3,7 +3,7 @@
 use std::{
     process::ExitCode,
     sync::{
-        Arc,
+        Arc, Mutex, PoisonError, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -22,17 +22,17 @@ use crate::{
 };
 
 /// Runs the application and returns the process exit code.
-pub fn run(cli: Cli) -> ExitCode {
+pub fn run(cli: &Cli) -> ExitCode {
     let mut ctx = match Ctx::new(&cli.global) {
         Ok(ctx) => ctx,
         Err(error) => {
             let mut ui = build_ui(&cli.global);
-            return fail(error, &mut ui);
+            return fail(&error, &mut ui);
         }
     };
-    match dispatch(cli.command, &mut ctx) {
+    match dispatch(&cli.command, &mut ctx) {
         Ok(code) => code,
-        Err(error) => fail(error, &mut ctx.ui),
+        Err(error) => fail(&error, &mut ctx.ui),
     }
 }
 
@@ -87,12 +87,24 @@ fn build_ui(global: &GlobalArgs) -> Ui {
 }
 
 fn install_handler(cancel: &Cancellation) -> Result<(), CtrlcError> {
-    let flag = Arc::clone(&cancel.0);
-    let result = ctrlc::set_handler(move || {
+    static TARGET: Mutex<Weak<AtomicBool>> = Mutex::new(Weak::new());
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+    *TARGET.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&cancel.0);
+    INTERRUPTED.store(false, Ordering::SeqCst);
+
+    let result = ctrlc::set_handler(|| {
         // The first interrupt requests a graceful stop, the second one exits
         // immediately so the process cannot get stuck.
-        if flag.swap(true, Ordering::SeqCst) {
+        if INTERRUPTED.swap(true, Ordering::SeqCst) {
             std::process::exit(i32::from(EXIT_INTERRUPT));
+        }
+        let target = TARGET
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .upgrade();
+        if let Some(flag) = target {
+            flag.store(true, Ordering::SeqCst);
         }
     });
     match result {
@@ -101,17 +113,17 @@ fn install_handler(cancel: &Cancellation) -> Result<(), CtrlcError> {
     }
 }
 
-fn dispatch(command: Command, ctx: &mut Ctx) -> anyhow::Result<ExitCode> {
+fn dispatch(command: &Command, ctx: &mut Ctx) -> anyhow::Result<ExitCode> {
     match command {
         Command::Solve(args) => solve::run(args, ctx),
         Command::Search(args) => search::run(args, ctx),
     }
 }
 
-fn fail(error: anyhow::Error, ui: &mut Ui) -> ExitCode {
-    if error::is_broken_pipe(&error) {
+fn fail(error: &anyhow::Error, ui: &mut Ui) -> ExitCode {
+    if error::is_broken_pipe(error) {
         return ExitCode::from(error::EXIT_SUCCESS);
     }
-    let _ = error::render(&error, ui);
-    error::map_error(&error)
+    let _ = error::render(error, ui);
+    error::map_error(error)
 }

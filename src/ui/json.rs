@@ -1,6 +1,6 @@
 //! The JSON output shell.
 
-use std::io;
+use std::{io, time::Duration};
 
 use serde::Serialize;
 
@@ -25,4 +25,9 @@ pub fn write<T: Serialize>(ui: &mut Ui, command: &str, body: &T) -> io::Result<(
         command,
         body,
     })
+}
+
+/// Converts a duration to milliseconds, rounded to microsecond precision.
+pub fn elapsed_ms(duration: Duration) -> f64 {
+    (duration.as_secs_f64() * 1_000_000.0).round() / 1000.0
 }

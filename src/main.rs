@@ -10,5 +10,5 @@ mod input;
 mod ui;
 
 fn main() -> ExitCode {
-    app::run(cli::Cli::parse())
+    app::run(&cli::Cli::parse())
 }

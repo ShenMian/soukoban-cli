@@ -44,7 +44,7 @@ impl Column {
 
     /// Marks the column as shrinkable when the table overflows.
     #[must_use]
-    pub fn shrinkable(mut self) -> Self {
+    pub const fn shrinkable(mut self) -> Self {
         self.shrink = true;
         self
     }
@@ -176,6 +176,7 @@ fn trim_last(mut row: Vec<Cell>) -> Vec<Cell> {
 pub fn terminal_width() -> usize {
     Term::stdout()
         .size_checked()
+        .filter(|&(_, width)| width > 0)
         .map_or(DEFAULT_WIDTH, |(_, width)| usize::from(width))
 }
 

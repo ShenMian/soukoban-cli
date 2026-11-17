@@ -219,3 +219,27 @@ fn invalid_queries_are_reported() {
     assert!(stderr.contains("error: failed to parse level 1 of `invalid.xsb`"));
     assert!(stderr.contains("caused by: mismatch between number of boxes and goals"));
 }
+
+#[test]
+fn ascii_mode_emits_only_ascii_output() {
+    let output = command()
+        .args(["--ascii", "search"])
+        .arg(fixture("single.xsb"))
+        .arg("--dir")
+        .arg(collections())
+        .output()
+        .expect("the command runs");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.is_ascii(),
+        "ASCII table must contain only ASCII: {stdout}"
+    );
+    assert!(
+        stderr.is_ascii(),
+        "ASCII summary must contain only ASCII: {stderr}"
+    );
+    assert!(stderr.contains(" - 2 matches - "));
+}

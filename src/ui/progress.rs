@@ -25,13 +25,6 @@ const TICK_INTERVAL: Duration = Duration::from_millis(100);
 const RATE_WINDOW: Duration = Duration::from_millis(100);
 /// The terminal height assumed when it cannot be determined.
 const DEFAULT_ROWS: usize = 24;
-/// The template of the batch line.
-const BATCH_TEMPLATE: &str = "{spinner} {bar:14} {pos:>4}/{len} · {msg}";
-/// The template of a single level, which has no batch position.
-const SINGLE_TEMPLATE: &str = "{spinner} {bar:14} · {msg}";
-/// The template of a level line below the batch line, which has no spinner of
-/// its own.
-const LEVEL_TEMPLATE: &str = "  {bar:14} · {msg}";
 
 /// The width of the level number in a progress message.
 const LEVEL_WIDTH: usize = 4;
@@ -47,9 +40,9 @@ pub fn level_label(number: usize) -> String {
 }
 
 /// Describes the statistics of a level, padded to keep a stable layout.
-fn level_message(number: usize, expansions: u64, elapsed: Duration) -> String {
+fn level_message(number: usize, expansions: u64, elapsed: Duration, sep: &str) -> String {
     format!(
-        "{label} · expanded {:>STAT_WIDTH$} · speed {:>STAT_WIDTH$}/s · elapsed {:>STAT_WIDTH$.1}s",
+        "{label}{sep}expanded {:>STAT_WIDTH$}{sep}speed {:>STAT_WIDTH$}/s{sep}elapsed {:>STAT_WIDTH$.1}s",
         format_count(expansions),
         format_count(rate(expansions, elapsed)),
         elapsed.as_secs_f64(),
@@ -94,6 +87,8 @@ pub struct Progress {
     single: Option<ProgressBar>,
     /// The style of the level lines.
     line_style: ProgressStyle,
+    /// The separator between items of a progress line.
+    separator: &'static str,
     /// The number of level lines that fit below the batch line.
     lanes: usize,
     /// Expanded nodes of all levels.
@@ -106,11 +101,14 @@ impl Progress {
     /// Creates the progress display of a run over `total` levels solved by
     /// `jobs` workers.
     pub fn new(ui: &Ui, enabled: bool, total: u64, jobs: usize) -> Self {
+        let separator = ui.theme().separator();
+        let level_template = format!("  {{bar:14}}{separator}{{msg}}");
         let mut progress = Self {
             multi: None,
             batch: None,
             single: None,
-            line_style: style(ui, LEVEL_TEMPLATE),
+            line_style: style(ui, &level_template),
+            separator,
             lanes: 0,
             expansions: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
@@ -120,8 +118,10 @@ impl Progress {
         }
         let target = draw_target(ui);
         if total > 1 {
+            let batch_template =
+                format!("{{spinner}} {{bar:14}} {{pos:>4}}/{{len}}{separator}{{msg}}");
             let multi = MultiProgress::with_draw_target(target);
-            let batch = multi.add(bar(ui, BATCH_TEMPLATE, Some(total)));
+            let batch = multi.add(bar(ui, &batch_template, Some(total)));
             // Spinners only advance with a steady tick; without one the
             // batch spinner would move once per finished level.
             batch.enable_steady_tick(TICK_INTERVAL);
@@ -130,7 +130,8 @@ impl Progress {
             progress.batch = Some(batch);
             progress.set_totals();
         } else {
-            let single = bar(ui, SINGLE_TEMPLATE, Some(1));
+            let single_template = format!("{{spinner}} {{bar:14}}{separator}{{msg}}");
+            let single = bar(ui, &single_template, Some(1));
             single.set_draw_target(target);
             single.enable_steady_tick(TICK_INTERVAL);
             progress.single = Some(single);
@@ -156,6 +157,28 @@ impl Progress {
         })
     }
 
+    /// Starts reporting progress for the level numbered `number`.
+    ///
+    /// Writes the initial label to `line` (or to the single-level bar) so
+    /// already solved levels still display their number.
+    pub fn begin_level<'a>(
+        &'a self,
+        line: Option<&'a LevelLine>,
+        number: usize,
+    ) -> SearchReporter<'a> {
+        if let Some(line) = line {
+            line.set_message(level_label(number));
+        } else if let Some(single) = &self.single {
+            single.set_message(level_label(number));
+        }
+        let target = if self.single.is_some() {
+            Target::Single
+        } else {
+            Target::Line(line)
+        };
+        SearchReporter::new(self, target, number)
+    }
+
     /// Runs `f` while the display is suspended, so that output written by `f`
     /// is not overwritten by a redraw.
     pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
@@ -175,13 +198,6 @@ impl Progress {
         }
     }
 
-    /// Updates the message of the single-level line.
-    pub fn set_message(&self, message: String) {
-        if let Some(bar) = &self.single {
-            bar.set_message(message);
-        }
-    }
-
     /// Stops the spinners and clears the progress display.
     pub fn finish(&self) {
         // The tickers keep drawing until they are stopped.
@@ -197,7 +213,7 @@ impl Progress {
         }
     }
 
-    fn is_enabled(&self) -> bool {
+    const fn is_enabled(&self) -> bool {
         self.batch.is_some() || self.single.is_some()
     }
 
@@ -225,10 +241,11 @@ impl Progress {
         let Some(bar) = &self.batch else {
             return;
         };
+        let sep = self.separator;
         let elapsed = self.started.elapsed();
         let expansions = self.expansions.load(Ordering::Relaxed);
         bar.set_message(format!(
-            "expanded {:>STAT_WIDTH$} · speed {:>STAT_WIDTH$}/s · elapsed {:>STAT_WIDTH$.1}s",
+            "expanded {:>STAT_WIDTH$}{sep}speed {:>STAT_WIDTH$}/s{sep}elapsed {:>STAT_WIDTH$.1}s",
             format_count(expansions),
             format_count(rate(expansions, elapsed)),
             elapsed.as_secs_f64()
@@ -285,13 +302,16 @@ fn heuristic_position(best: i32, max: i32) -> Option<(u64, u64)> {
         return None;
     }
     let best = best.clamp(0, max);
-    Some(((max - best) as u64, max as u64))
+    Some((
+        u64::from((max - best).cast_unsigned()),
+        u64::from(max.cast_unsigned()),
+    ))
 }
 
 /// Builds a progress style with the application glyphs.
 fn style(ui: &Ui, template: &str) -> ProgressStyle {
     ProgressStyle::with_template(template)
-        .expect("static progress template is valid")
+        .expect("progress template is valid")
         .progress_chars(ui.theme().bar_chars())
         .tick_chars(ui.theme().ticks())
 }
@@ -318,6 +338,7 @@ fn draw_target(ui: &Ui) -> ProgressDrawTarget {
 fn level_lanes() -> usize {
     let rows = Term::stderr()
         .size_checked()
+        .filter(|&(rows, _)| rows > 0)
         .map_or(DEFAULT_ROWS, |(rows, _)| usize::from(rows));
     rows.saturating_sub(2).max(1)
 }
@@ -335,6 +356,7 @@ enum Target<'a> {
 pub struct SearchReporter<'a> {
     progress: &'a Progress,
     target: Target<'a>,
+    enabled: bool,
     number: usize,
     expansions: u64,
     /// The expansions already added to the run totals.
@@ -348,23 +370,12 @@ pub struct SearchReporter<'a> {
 }
 
 impl<'a> SearchReporter<'a> {
-    /// Creates a reporter that writes the statistics of the single level
-    /// numbered `number` to the line of the run.
-    pub fn single(progress: &'a Progress, number: usize) -> Self {
-        Self::new(progress, Target::Single, number)
-    }
-
-    /// Creates a reporter that writes the statistics of the level numbered
-    /// `number` to a level line and feeds the run totals.
-    pub fn line(progress: &'a Progress, line: Option<&'a LevelLine>, number: usize) -> Self {
-        Self::new(progress, Target::Line(line), number)
-    }
-
     fn new(progress: &'a Progress, target: Target<'a>, number: usize) -> Self {
         let now = Instant::now();
         Self {
             progress,
             target,
+            enabled: progress.is_enabled(),
             number,
             expansions: 0,
             reported: 0,
@@ -376,17 +387,23 @@ impl<'a> SearchReporter<'a> {
     }
 
     /// Returns the number of nodes expanded so far.
-    pub fn expansions(&self) -> u64 {
+    pub const fn expansions(&self) -> u64 {
         self.expansions
     }
 
     fn refresh(&mut self) {
-        self.last_refresh = Instant::now();
-        if !self.progress.is_enabled() {
+        if !self.enabled {
             return;
         }
-        let elapsed = self.started.elapsed();
-        let message = level_message(self.number, self.expansions, elapsed);
+        let now = Instant::now();
+        self.last_refresh = now;
+        let elapsed = now.saturating_duration_since(self.started);
+        let message = level_message(
+            self.number,
+            self.expansions,
+            elapsed,
+            self.progress.separator,
+        );
         match self.target {
             Target::Single => {
                 self.progress
@@ -410,22 +427,31 @@ impl<'a> SearchReporter<'a> {
 
 impl Observer for SearchReporter<'_> {
     fn on_node_expanded(&mut self, node: &Node) {
+        let first = self.expansions == 0;
+        self.expansions += 1;
+        if !self.enabled {
+            return;
+        }
         // The root is the first expanded node: it sets the length of the bar
         // and starts the elapsed time.
-        if self.expansions == 0 {
-            self.started = Instant::now();
+        if first {
+            let now = Instant::now();
+            self.started = now;
+            self.last_refresh = now;
             self.max_heuristic = node.heuristic();
             self.best_heuristic = self.max_heuristic;
+        } else {
+            self.best_heuristic = self.best_heuristic.min(node.heuristic());
         }
-        self.expansions += 1;
-        self.best_heuristic = self.best_heuristic.min(node.heuristic());
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
             self.refresh();
         }
     }
 
     fn on_successor(&mut self, _parent: &Node, child: &Node) {
-        self.best_heuristic = self.best_heuristic.min(child.heuristic());
+        if self.enabled {
+            self.best_heuristic = self.best_heuristic.min(child.heuristic());
+        }
     }
 }
 
@@ -444,10 +470,15 @@ fn rate(expansions: u64, elapsed: Duration) -> u64 {
     if elapsed < RATE_WINDOW {
         return 0;
     }
-    (expansions as f64 / elapsed.as_secs_f64()) as u64
+    let per_sec = (u128::from(expansions) * 1_000_000_000) / elapsed.as_nanos();
+    u64::try_from(per_sec).unwrap_or(u64::MAX)
 }
 
 /// Formats a node count in a compact human readable form.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "compact display rounds node counts to one decimal place"
+)]
 pub fn format_count(count: u64) -> String {
     if count < 1_000 {
         count.to_string()
@@ -486,12 +517,16 @@ mod tests {
         assert_eq!(level_label(1), "#1   ");
         assert_eq!(level_label(155), "#155 ");
         assert_eq!(
-            level_message(1, 0, Duration::ZERO),
+            level_message(1, 0, Duration::ZERO, " · "),
             "#1    · expanded      0 · speed      0/s · elapsed    0.0s"
         );
         assert_eq!(
-            level_message(155, 217_300, Duration::from_millis(2_500)),
+            level_message(155, 217_300, Duration::from_millis(2_500), " · "),
             "#155  · expanded 217.3K · speed  86.9K/s · elapsed    2.5s"
+        );
+        assert_eq!(
+            level_message(1, 0, Duration::ZERO, " - "),
+            "#1    - expanded      0 - speed      0/s - elapsed    0.0s"
         );
     }
 

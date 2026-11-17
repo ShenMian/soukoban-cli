@@ -15,7 +15,7 @@ use soukoban::prelude::*;
 use crate::{
     app::{Cancellation, Ctx},
     error::{self, Result, with_hint},
-    input::{self, Input, LevelSpec},
+    input::{self, Input, LevelSpec, SelectedLevel},
     ui::{
         json,
         render::{describe_count, format_elapsed},
@@ -27,7 +27,6 @@ use crate::{
 #[derive(clap::Args)]
 pub struct Args {
     /// Level file to search for, or `-` to read from stdin.
-    #[arg(value_parser = Input::parse)]
     pub input: Input,
 
     /// Directory to search recursively for `.xsb` files.
@@ -47,40 +46,13 @@ pub struct Args {
 }
 
 /// Runs the `search` command.
-pub fn run(args: Args, ctx: &mut Ctx) -> Result<ExitCode> {
-    let text = input::read(&args.input)?;
-    let name = args.input.display_name();
-    let levels = Level::load_from_str(&text).collect::<Vec<_>>();
-
-    if levels.is_empty() {
-        return Err(with_hint(
-            anyhow::anyhow!("no levels found in `{name}`"),
-            "check that the input is a valid XSB file",
-        ));
-    }
-
-    let selected = args.level.select(levels.len()).map_err(|error| {
-        with_hint(
-            anyhow::Error::new(error),
-            format!(
-                "the input has {}",
-                describe_count(levels.len(), "level", "levels")
-            ),
-        )
-    })?;
-
-    for &index in &selected {
-        if let Err(error) = &levels[index] {
-            return Err(anyhow::Error::new(error.clone())
-                .context(format!("failed to parse level {} of `{name}`", index + 1)));
-        }
-    }
-
-    let (queries, index) = build_index(&levels, &selected, &name);
+pub fn run(args: &Args, ctx: &mut Ctx) -> Result<ExitCode> {
+    let queries = input::load_levels(&args.input, &args.level)?;
+    let index = build_index(&queries);
     let started = Instant::now();
-    let mut outcome = search_directory(&args, queries.len(), &index, &ctx.cancel)?;
+    let mut outcome = search_directory(args, queries.len(), &index, &ctx.cancel)?;
     let elapsed = started.elapsed();
-    outcome.summary.elapsed_ms = elapsed_ms(elapsed);
+    outcome.summary.elapsed_ms = json::elapsed_ms(elapsed);
     render_results(
         ctx,
         &queries,
@@ -99,16 +71,6 @@ pub fn run(args: Args, ctx: &mut Ctx) -> Result<ExitCode> {
     Ok(ExitCode::from(error::EXIT_SUCCESS))
 }
 
-/// A parsed level of an input.
-type LevelResult = std::result::Result<Level, ParseLevelError>;
-
-/// A level of the input to search for.
-struct Query {
-    /// The 1-based level number in the input.
-    index: usize,
-    title: String,
-}
-
 /// A matching level found in the directory.
 struct Match {
     file: String,
@@ -125,29 +87,14 @@ struct SearchOutcome {
     interrupted: bool,
 }
 
-/// Prepares the query maps and indexes them for lookup.
-fn build_index(
-    levels: &[LevelResult],
-    selected: &[usize],
-    name: &str,
-) -> (Vec<Query>, FxHashMap<Map, Vec<usize>>) {
-    let mut queries = Vec::with_capacity(selected.len());
-    let mut index = FxHashMap::default();
-
-    for &level_index in selected {
-        let level = levels[level_index]
-            .as_ref()
-            .expect("selected levels are parsed");
-        let map = canonical_map(level.map());
-        let query = queries.len();
-        queries.push(Query {
-            index: level_index + 1,
-            title: resolve_title(level, name, level_index),
-        });
-        index.entry(map).or_insert_with(Vec::new).push(query);
+/// Indexes the canonicalized query maps by position in `queries`.
+fn build_index(queries: &[SelectedLevel]) -> FxHashMap<Map, Vec<usize>> {
+    let mut index: FxHashMap<Map, Vec<usize>> = FxHashMap::default();
+    for (query_index, query) in queries.iter().enumerate() {
+        let map = canonical_map(query.level.map());
+        index.entry(map).or_default().push(query_index);
     }
-
-    (queries, index)
+    index
 }
 
 /// Searches the directory for the indexed maps.
@@ -157,16 +104,15 @@ fn search_directory(
     index: &FxHashMap<Map, Vec<usize>>,
     cancel: &Cancellation,
 ) -> Result<SearchOutcome> {
-    let (paths, mut warnings) = xsb_files(&args.dir)?;
+    let (paths, mut warnings, mut interrupted) = xsb_files(&args.dir, cancel)?;
     let mut matches = (0..query_count).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut summary = Summary {
         patterns: query_count,
         ..Summary::default()
     };
-    let mut interrupted = false;
 
-    for path in paths {
-        if cancel.is_requested() {
+    'files: for path in paths {
+        if interrupted || cancel.is_requested() {
             interrupted = true;
             break;
         }
@@ -183,6 +129,10 @@ fn search_directory(
         let file = display_path(&args.dir, &path);
 
         for (level_index, level) in Level::load_from_str(&text).enumerate() {
+            if cancel.is_requested() {
+                interrupted = true;
+                break 'files;
+            }
             let level = match level {
                 Ok(level) => level,
                 Err(error) => {
@@ -221,8 +171,9 @@ fn search_directory(
     })
 }
 
-/// Returns every `.xsb` file below `root`, sorted by path.
-fn xsb_files(root: &Path) -> Result<(Vec<PathBuf>, Vec<String>)> {
+/// Returns every `.xsb` file below `root`, sorted by path, and whether the
+/// traversal was interrupted.
+fn xsb_files(root: &Path, cancel: &Cancellation) -> Result<(Vec<PathBuf>, Vec<String>, bool)> {
     let metadata = fs::metadata(root)
         .with_context(|| format!("failed to read directory `{}`", root.display()))
         .map_err(|error| with_hint(error, "check the directory path"))?;
@@ -238,6 +189,10 @@ fn xsb_files(root: &Path) -> Result<(Vec<PathBuf>, Vec<String>)> {
     let mut pending = vec![root.to_path_buf()];
 
     while let Some(dir) = pending.pop() {
+        if cancel.is_requested() {
+            files.sort();
+            return Ok((files, warnings, true));
+        }
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(error) if dir == root => {
@@ -250,6 +205,10 @@ fn xsb_files(root: &Path) -> Result<(Vec<PathBuf>, Vec<String>)> {
             }
         };
         for entry in entries {
+            if cancel.is_requested() {
+                files.sort();
+                return Ok((files, warnings, true));
+            }
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -274,7 +233,7 @@ fn xsb_files(root: &Path) -> Result<(Vec<PathBuf>, Vec<String>)> {
     }
 
     files.sort();
-    Ok((files, warnings))
+    Ok((files, warnings, false))
 }
 
 /// Returns `true` if `path` has the `.xsb` extension, ignoring ASCII case.
@@ -298,19 +257,10 @@ fn display_path(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-/// Returns the display title of a level.
-fn resolve_title(level: &Level, input_name: &str, index: usize) -> String {
-    level
-        .metadata()
-        .get("title")
-        .cloned()
-        .unwrap_or_else(|| format!("{input_name} #{}", index + 1))
-}
-
 /// Writes the results of the run.
 fn render_results(
     ctx: &mut Ctx,
-    queries: &[Query],
+    queries: &[SelectedLevel],
     matches: &[Vec<Match>],
     summary: &Summary,
     warnings: &[String],
@@ -322,7 +272,7 @@ fn render_results(
                 .iter()
                 .enumerate()
                 .map(|(query_index, query)| ResultEntry {
-                    index: query.index,
+                    index: query.number(),
                     title: &query.title,
                     matches: matches[query_index]
                         .iter()
@@ -356,7 +306,7 @@ fn render_results(
         let entries = &matches[query_index];
         if entries.is_empty() {
             table.push_row([
-                Cell::new(query.index.to_string()),
+                Cell::new(query.number().to_string()),
                 Cell::new(query.title.as_str()),
                 Cell::new("no match"),
                 Cell::new("-"),
@@ -368,7 +318,7 @@ fn render_results(
             let first = position == 0;
             table.push_row([
                 Cell::new(if first {
-                    query.index.to_string()
+                    query.number().to_string()
                 } else {
                     String::new()
                 }),
@@ -404,7 +354,8 @@ fn render_results(
     parts.push(format_elapsed(elapsed));
 
     let style = ctx.ui.theme().muted;
-    writeln!(ctx.ui.err(), "{style}{}{style:#}", parts.join(" · "))?;
+    let sep = ctx.ui.theme().separator();
+    writeln!(ctx.ui.err(), "{style}{}{style:#}", parts.join(sep))?;
     Ok(())
 }
 
@@ -442,9 +393,4 @@ struct Summary {
     skipped_files: usize,
     skipped_levels: usize,
     elapsed_ms: f64,
-}
-
-/// Converts a duration to milliseconds, rounded to microsecond precision.
-fn elapsed_ms(duration: Duration) -> f64 {
-    (duration.as_secs_f64() * 1_000_000.0).round() / 1000.0
 }

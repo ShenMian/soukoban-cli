@@ -73,6 +73,7 @@ pub fn solve_detail(
     budget: Option<Duration>,
 ) -> io::Result<()> {
     let theme = *ui.theme();
+    let sep = theme.separator();
     let writer = ui.out();
 
     write!(writer, "{s}{}{s:#}", report.title, s = theme.title)?;
@@ -80,7 +81,6 @@ pub fn solve_detail(
         writer,
         "{s}{sep}{algorithm}{sep}{strategy}{s:#}",
         s = theme.muted,
-        sep = theme.separator()
     )?;
 
     write_map_block(writer, report.map, &theme)?;
@@ -99,7 +99,7 @@ pub fn solve_detail(
             let stats = report.stats.expect("solved levels carry statistics");
             writeln!(
                 writer,
-                "{s}{}{s:#} solved in {} · {} · {}",
+                "{s}{}{s:#} solved in {}{sep}{}{sep}{}",
                 theme.check(),
                 format_elapsed(stats.elapsed),
                 describe_count(actions.shifts(), "push", "pushes"),
@@ -109,7 +109,7 @@ pub fn solve_detail(
             let secondary = actions.secondary_values();
             writeln!(
                 writer,
-                "  {s}box lines {} · box changes {} · pushing sessions {} · player lines {}{s:#}",
+                "  {s}box lines {}{sep}box changes {}{sep}pushing sessions {}{sep}player lines {}{s:#}",
                 secondary.box_lines,
                 secondary.box_changes,
                 secondary.pushing_sessions,
@@ -200,18 +200,23 @@ pub fn solve_table(ui: &mut Ui, reports: &[LevelReport<'_>]) -> io::Result<()> {
 
 /// Writes the summary line of a batch run to stderr.
 pub fn solve_summary(ui: &mut Ui, summary: &SolveSummary) -> io::Result<()> {
+    if summary.processed == 0 {
+        return Ok(());
+    }
     let style = ui.theme().muted;
+    let sep = ui.theme().separator();
     let levels = if summary.processed < summary.total {
         format!("{} of {} levels", summary.processed, summary.total)
     } else {
         describe_count(summary.total, "level", "levels")
     };
     // An interrupted run processes only part of the levels; average over those.
-    let average = summary.elapsed / summary.processed as u32;
+    let average =
+        u32::try_from(summary.processed).map_or(Duration::ZERO, |count| summary.elapsed / count);
     let nodes = summary.expansions / summary.processed as u64;
     writeln!(
         ui.err(),
-        "{style}{levels} · {} solved · {} · avg {}/level · avg {} nodes/level{style:#}",
+        "{style}{levels}{sep}{} solved{sep}{}{sep}avg {}/level{sep}avg {} nodes/level{style:#}",
         summary.solved,
         format_elapsed(summary.elapsed),
         format_elapsed(average),
@@ -221,7 +226,7 @@ pub fn solve_summary(ui: &mut Ui, summary: &SolveSummary) -> io::Result<()> {
 
 /// Writes a bordered map block to stdout.
 fn write_map_block(writer: &mut dyn io::Write, map: &Map, theme: &Theme) -> io::Result<()> {
-    let width = map.dimensions().x as usize;
+    let width = usize::try_from(map.dimensions().x).unwrap_or(0);
     let horizontal = theme.horizontal().to_string().repeat(width + 2);
 
     writeln!(
@@ -274,7 +279,7 @@ fn tile_display(tiles: Tiles, theme: &Theme) -> Option<(char, Style)> {
 }
 
 /// Returns the status text of a level.
-fn status_text(status: SolveStatus) -> &'static str {
+const fn status_text(status: SolveStatus) -> &'static str {
     match status {
         SolveStatus::AlreadySolved => "already solved",
         SolveStatus::Solved => "solved",
@@ -284,7 +289,7 @@ fn status_text(status: SolveStatus) -> &'static str {
 }
 
 /// Returns the status style of a level.
-fn status_style(status: SolveStatus, theme: &Theme) -> Style {
+const fn status_style(status: SolveStatus, theme: &Theme) -> Style {
     match status {
         SolveStatus::AlreadySolved => theme.success_muted,
         SolveStatus::Solved => theme.success,
@@ -294,7 +299,7 @@ fn status_style(status: SolveStatus, theme: &Theme) -> Style {
 }
 
 /// Formats a count with a singular or plural noun.
-pub(crate) fn describe_count(count: usize, singular: &str, plural: &str) -> String {
+pub fn describe_count(count: usize, singular: &str, plural: &str) -> String {
     if count == 1 {
         format!("{count} {singular}")
     } else {
@@ -311,35 +316,42 @@ fn encode_actions(actions: &Actions) -> String {
 
 /// Formats an elapsed time for human readable output.
 pub fn format_elapsed(duration: Duration) -> String {
-    let seconds = duration.as_secs_f64();
-    if seconds < 1.0 {
-        format!("{:.1} ms", seconds * 1000.0)
-    } else if seconds < 60.0 {
-        format!("{seconds:.2}s")
-    } else {
-        let minutes = (seconds / 60.0) as u64;
-        format!("{minutes}m {:.0}s", seconds - minutes as f64 * 60.0)
+    let tenths_ms = (duration.as_nanos() + 50_000) / 100_000;
+    if tenths_ms < 10_000 {
+        return format!("{}.{} ms", tenths_ms / 10, tenths_ms % 10);
     }
+    let centis = (duration.as_nanos() + 5_000_000) / 10_000_000;
+    if centis < 6_000 {
+        return format!("{}.{:02}s", centis / 100, centis % 100);
+    }
+    let seconds = (duration.as_millis() + 500) / 1_000;
+    format!("{}m {}s", seconds / 60, seconds % 60)
 }
 
 /// Formats a time limit for human readable output.
 pub fn format_budget(duration: Duration) -> String {
-    let seconds = duration.as_secs_f64();
-    if seconds >= 3600.0 && seconds % 3600.0 == 0.0 {
-        format!("{}h", seconds / 3600.0)
-    } else if seconds >= 60.0 && seconds % 60.0 == 0.0 {
-        format!("{}m", seconds / 60.0)
-    } else if seconds >= 1.0 {
-        format!("{seconds}s")
+    if duration.subsec_nanos() == 0 {
+        let seconds = duration.as_secs();
+        if seconds >= 3600 && seconds.is_multiple_of(3600) {
+            format!("{}h", seconds / 3600)
+        } else if seconds >= 60 && seconds.is_multiple_of(60) {
+            format!("{}m", seconds / 60)
+        } else {
+            format!("{seconds}s")
+        }
+    } else if duration >= Duration::from_secs(1) {
+        format!("{}s", duration.as_secs_f64())
+    } else if duration.subsec_nanos().is_multiple_of(1_000_000) {
+        format!("{}ms", duration.subsec_millis())
     } else {
-        format!("{}ms", (seconds * 1000.0).round() as u64)
+        format!("{}ms", duration.as_secs_f64() * 1000.0)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::theme::Glyphs;
+    use crate::{cli::Format, ui::theme::Glyphs};
 
     /// Strips SGR escape sequences from rendered output.
     fn strip_styles(text: &str) -> String {
@@ -378,12 +390,16 @@ mod tests {
     fn formats_elapsed_times() {
         assert_eq!(format_elapsed(Duration::from_micros(12_400)), "12.4 ms");
         assert_eq!(format_elapsed(Duration::from_millis(310)), "310.0 ms");
+        assert_eq!(format_elapsed(Duration::from_micros(999_960)), "1.00s");
         assert_eq!(format_elapsed(Duration::from_millis(1_234)), "1.23s");
+        assert_eq!(format_elapsed(Duration::from_millis(59_996)), "1m 0s");
         assert_eq!(format_elapsed(Duration::from_secs(75)), "1m 15s");
+        assert_eq!(format_elapsed(Duration::from_millis(119_600)), "2m 0s");
     }
 
     #[test]
     fn formats_time_limits() {
+        assert_eq!(format_budget(Duration::from_micros(500)), "0.5ms");
         assert_eq!(format_budget(Duration::from_millis(500)), "500ms");
         assert_eq!(format_budget(Duration::from_secs(30)), "30s");
         assert_eq!(format_budget(Duration::from_secs(300)), "5m");
@@ -396,5 +412,38 @@ mod tests {
         assert_eq!(describe_count(1, "push", "pushes"), "1 push");
         assert_eq!(describe_count(0, "push", "pushes"), "0 pushes");
         assert_eq!(describe_count(12, "move", "moves"), "12 moves");
+    }
+
+    #[test]
+    fn summary_handles_empty_runs_and_ascii_separators() {
+        let mut ui = Ui::buffered(Format::Human, Glyphs::Ascii);
+        solve_summary(
+            &mut ui,
+            &SolveSummary {
+                processed: 0,
+                total: 3,
+                solved: 0,
+                expansions: 0,
+                elapsed: Duration::ZERO,
+            },
+        )
+        .expect("empty summary succeeds");
+        solve_summary(
+            &mut ui,
+            &SolveSummary {
+                processed: 2,
+                total: 5,
+                solved: 1,
+                expansions: 40,
+                elapsed: Duration::from_millis(100),
+            },
+        )
+        .expect("summary succeeds");
+        let (_, err) = ui.into_parts();
+        assert!(
+            err.is_ascii(),
+            "ASCII summary must contain only ASCII: {err}"
+        );
+        assert!(err.contains("2 of 5 levels - 1 solved"));
     }
 }

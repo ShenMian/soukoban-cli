@@ -50,7 +50,7 @@ pub struct Theme {
 
 impl Theme {
     /// Creates the theme with the given glyph set.
-    pub fn new(glyphs: Glyphs) -> Self {
+    pub const fn new(glyphs: Glyphs) -> Self {
         Self {
             title: Style::new().bold(),
             label: Style::new().dimmed(),
@@ -74,7 +74,7 @@ impl Theme {
     }
 
     /// Returns the horizontal border glyph.
-    pub fn horizontal(&self) -> char {
+    pub const fn horizontal(&self) -> char {
         match self.glyphs {
             Glyphs::Unicode => '─',
             Glyphs::Ascii => '-',
@@ -82,7 +82,7 @@ impl Theme {
     }
 
     /// Returns the vertical border glyph.
-    pub fn vertical(&self) -> char {
+    pub const fn vertical(&self) -> char {
         match self.glyphs {
             Glyphs::Unicode => '│',
             Glyphs::Ascii => '|',
@@ -90,7 +90,7 @@ impl Theme {
     }
 
     /// Returns the top left border glyph.
-    pub fn top_left(&self) -> char {
+    pub const fn top_left(&self) -> char {
         match self.glyphs {
             Glyphs::Unicode => '╭',
             Glyphs::Ascii => '+',
@@ -98,7 +98,7 @@ impl Theme {
     }
 
     /// Returns the top right border glyph.
-    pub fn top_right(&self) -> char {
+    pub const fn top_right(&self) -> char {
         match self.glyphs {
             Glyphs::Unicode => '╮',
             Glyphs::Ascii => '+',
@@ -106,7 +106,7 @@ impl Theme {
     }
 
     /// Returns the bottom left border glyph.
-    pub fn bottom_left(&self) -> char {
+    pub const fn bottom_left(&self) -> char {
         match self.glyphs {
             Glyphs::Unicode => '╰',
             Glyphs::Ascii => '+',
@@ -114,7 +114,7 @@ impl Theme {
     }
 
     /// Returns the bottom right border glyph.
-    pub fn bottom_right(&self) -> char {
+    pub const fn bottom_right(&self) -> char {
         match self.glyphs {
             Glyphs::Unicode => '╯',
             Glyphs::Ascii => '+',
@@ -122,7 +122,7 @@ impl Theme {
     }
 
     /// Returns the success glyph.
-    pub fn check(&self) -> &'static str {
+    pub const fn check(&self) -> &'static str {
         match self.glyphs {
             Glyphs::Unicode => "✓",
             Glyphs::Ascii => "v",
@@ -130,7 +130,7 @@ impl Theme {
     }
 
     /// Returns the failure glyph.
-    pub fn cross(&self) -> &'static str {
+    pub const fn cross(&self) -> &'static str {
         match self.glyphs {
             Glyphs::Unicode => "✗",
             Glyphs::Ascii => "x",
@@ -138,7 +138,7 @@ impl Theme {
     }
 
     /// Returns the timeout glyph.
-    pub fn timeout(&self) -> &'static str {
+    pub const fn timeout(&self) -> &'static str {
         match self.glyphs {
             Glyphs::Unicode => "◷",
             Glyphs::Ascii => "!",
@@ -146,7 +146,7 @@ impl Theme {
     }
 
     /// Returns the separator between items of a line.
-    pub fn separator(&self) -> &'static str {
+    pub const fn separator(&self) -> &'static str {
         match self.glyphs {
             Glyphs::Unicode => " · ",
             Glyphs::Ascii => " - ",
@@ -154,7 +154,7 @@ impl Theme {
     }
 
     /// Returns the ellipsis appended to truncated text.
-    pub fn ellipsis(&self) -> &'static str {
+    pub const fn ellipsis(&self) -> &'static str {
         match self.glyphs {
             Glyphs::Unicode => "…",
             Glyphs::Ascii => "...",
@@ -162,7 +162,7 @@ impl Theme {
     }
 
     /// Returns the progress bar characters (finished, partial, remaining).
-    pub fn bar_chars(&self) -> &'static str {
+    pub const fn bar_chars(&self) -> &'static str {
         match self.glyphs {
             Glyphs::Unicode => "█▉░",
             Glyphs::Ascii => "#=-",
@@ -170,7 +170,7 @@ impl Theme {
     }
 
     /// Returns the spinner tick characters.
-    pub fn ticks(&self) -> &'static str {
+    pub const fn ticks(&self) -> &'static str {
         match self.glyphs {
             Glyphs::Unicode => "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
             Glyphs::Ascii => "-\\|/",
@@ -179,7 +179,7 @@ impl Theme {
 }
 
 /// Returns the clap help styles, matching the application theme.
-pub fn clap_styles() -> clap::builder::styling::Styles {
+pub const fn clap_styles() -> clap::builder::styling::Styles {
     use clap::builder::styling::{AnsiColor, Effects, Styles};
 
     Styles::styled()

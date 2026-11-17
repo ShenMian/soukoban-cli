@@ -85,17 +85,17 @@ impl Ui {
     }
 
     /// Returns `true` if the JSON format is selected.
-    pub fn is_json(&self) -> bool {
-        self.format == Format::Json
+    pub const fn is_json(&self) -> bool {
+        matches!(self.format, Format::Json)
     }
 
     /// Returns the global progress choice.
-    pub fn progress(&self) -> ProgressChoice {
+    pub const fn progress(&self) -> ProgressChoice {
         self.progress
     }
 
     /// Returns the theme.
-    pub fn theme(&self) -> &Theme {
+    pub const fn theme(&self) -> &Theme {
         &self.theme
     }
 
@@ -133,50 +133,59 @@ impl Ui {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::ui::theme::Glyphs;
-
-    use super::*;
-
-    fn buffered_ui(format: Format) -> Ui {
-        Ui {
+impl Ui {
+    /// Creates an in-memory `Ui` for unit tests.
+    pub(crate) fn buffered(format: Format, glyphs: theme::Glyphs) -> Self {
+        Self {
             out: Output::Buffer(AutoStream::never(Vec::new())),
             err: Output::Buffer(AutoStream::never(Vec::new())),
             format,
             verbose: 0,
             progress: ProgressChoice::Never,
-            theme: Theme::new(Glyphs::Ascii),
+            theme: Theme::new(glyphs),
         }
     }
 
-    /// Returns the contents written to a buffer stream.
-    fn contents(stream: Output) -> String {
-        match stream {
-            Output::Buffer(stream) => String::from_utf8(stream.into_inner()).expect("valid UTF-8"),
-            _ => panic!("expected a buffer stream"),
+    /// Consumes the buffered `Ui` and returns `(stdout, stderr)`.
+    pub(crate) fn into_parts(self) -> (String, String) {
+        fn contents(stream: Output) -> String {
+            match stream {
+                Output::Buffer(stream) => {
+                    String::from_utf8(stream.into_inner()).expect("valid UTF-8")
+                }
+                Output::Stdout(_) | Output::Stderr(_) => panic!("expected a buffer stream"),
+            }
         }
+        (contents(self.out), contents(self.err))
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ui::theme::Glyphs;
+
+    use super::*;
 
     #[test]
     fn writes_warnings_to_the_error_stream() {
-        let mut ui = buffered_ui(Format::Human);
+        let mut ui = Ui::buffered(Format::Human, Glyphs::Ascii);
         ui.warning("check the input").expect("writing succeeds");
-        let Ui { out, err, .. } = ui;
-        assert_eq!(contents(err), "warning: check the input\n");
-        assert_eq!(contents(out), "");
+        let (out, err) = ui.into_parts();
+        assert_eq!(err, "warning: check the input\n");
+        assert_eq!(out, "");
     }
 
     #[test]
     fn json_output_respects_the_format() {
-        let mut ui = buffered_ui(Format::Human);
+        let mut ui = Ui::buffered(Format::Human, Glyphs::Ascii);
         ui.json(&"human").expect("writing succeeds");
-        let Ui { out, .. } = ui;
-        assert_eq!(contents(out), "");
+        let (out, _) = ui.into_parts();
+        assert_eq!(out, "");
 
-        let mut ui = buffered_ui(Format::Json);
+        let mut ui = Ui::buffered(Format::Json, Glyphs::Ascii);
         ui.json(&"json").expect("writing succeeds");
-        let Ui { out, .. } = ui;
-        assert_eq!(contents(out), "\"json\"\n");
+        let (out, _) = ui.into_parts();
+        assert_eq!(out, "\"json\"\n");
     }
 
     #[test]

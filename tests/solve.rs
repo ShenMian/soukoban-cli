@@ -370,10 +370,43 @@ fn ascii_mode_replaces_unicode_glyphs() {
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.is_ascii(),
+        "ASCII detail must contain only ASCII: {stdout}"
+    );
     assert!(stdout.contains("+-------+"));
     assert!(stdout.contains("| ##### |"));
     assert!(stdout.contains("v solved in"));
     assert!(!stdout.contains('╭'));
+    assert!(!stdout.contains('·'));
+
+    let batch = Command::cargo_bin("soukoban")
+        .expect("the binary is built")
+        .args([
+            "--ascii",
+            "--color",
+            "never",
+            "--progress",
+            "always",
+            "solve",
+            "--level",
+            "1..4",
+        ])
+        .arg(fixture("basic.xsb"))
+        .output()
+        .expect("the command runs");
+
+    assert_eq!(batch.status.code(), Some(0));
+    let batch_out = String::from_utf8_lossy(&batch.stdout);
+    let batch_err = String::from_utf8_lossy(&batch.stderr);
+    assert!(
+        batch_out.is_ascii(),
+        "ASCII table must contain only ASCII: {batch_out}"
+    );
+    assert!(
+        batch_err.is_ascii(),
+        "ASCII progress and summary must contain only ASCII: {batch_err}"
+    );
 }
 
 #[test]
@@ -698,6 +731,50 @@ fn usage_errors_exit_with_code_two() {
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid duration `nope`"));
+}
+
+#[test]
+fn bfs_with_move_optimal_strategy_exits_with_code_two() {
+    let output = command()
+        .args([
+            "solve",
+            "--algorithm",
+            "bfs",
+            "--strategy",
+            "move-optimal",
+            "--level",
+            "1",
+        ])
+        .arg(fixture("basic.xsb"))
+        .output()
+        .expect("the command runs");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("`--algorithm bfs` cannot be used with `--strategy move-optimal`"));
+}
+
+#[test]
+fn extreme_timeouts_do_not_panic() {
+    let overflow = command()
+        .args([
+            "solve",
+            "--timeout",
+            "99999999999999999999s",
+            "--level",
+            "1",
+        ])
+        .arg(fixture("basic.xsb"))
+        .output()
+        .expect("the command runs");
+    assert_eq!(overflow.status.code(), Some(2));
+
+    let far_future = command()
+        .args(["solve", "--timeout", "10000000000000h", "--level", "1"])
+        .arg(fixture("basic.xsb"))
+        .output()
+        .expect("the command runs");
+    assert_eq!(far_future.status.code(), Some(0));
 }
 
 #[test]

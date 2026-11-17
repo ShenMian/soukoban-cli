@@ -2,24 +2,27 @@
 
 use std::{
     collections::BTreeMap,
+    num::NonZero,
     process::ExitCode,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         mpsc,
     },
-    thread::{self, JoinHandle},
+    thread,
     time::{Duration, Instant},
 };
 
 use serde::Serialize;
-use soukoban::{prelude::*, solver::Solver};
+use soukoban::{
+    prelude::*,
+    solver::{Node, Observer, Solver},
+};
 
 use crate::{
     app::{Cancellation, Ctx},
     cli::{Algorithm, Strategy},
     error::{self, Result, with_hint},
-    input::{self, Input, LevelSpec},
+    input::{self, Input, LevelSpec, SelectedLevel},
     ui::{
         json,
         progress::{self, Progress, SearchReporter},
@@ -27,14 +30,10 @@ use crate::{
     },
 };
 
-/// The poll interval of the watchdog thread.
-const WATCHDOG_INTERVAL: Duration = Duration::from_millis(5);
-
 /// Search for a solution to a level.
 #[derive(clap::Args)]
 pub struct Args {
     /// Level file to solve, or `-` to read from stdin.
-    #[arg(value_parser = Input::parse)]
     pub input: Input,
 
     /// Levels to solve, 1-based: `3`, `1..5`, `2,7,9`, or `all`.
@@ -65,79 +64,46 @@ pub struct Args {
 }
 
 /// Runs the `solve` command.
-pub fn run(args: Args, ctx: &mut Ctx) -> Result<ExitCode> {
-    let text = input::read(&args.input)?;
-    let levels = Level::load_from_str(&text).collect::<Vec<_>>();
-    let name = args.input.display_name();
-
-    if levels.is_empty() {
-        return Err(with_hint(
-            anyhow::anyhow!("no levels found in `{name}`"),
-            "check that the input is a valid XSB file",
-        ));
+pub fn run(args: &Args, ctx: &mut Ctx) -> Result<ExitCode> {
+    if args.algorithm == Algorithm::Bfs && args.strategy == Strategy::MoveOptimal {
+        anyhow::bail!("`--algorithm bfs` cannot be used with `--strategy move-optimal`");
     }
 
-    let selected = args.level.select(levels.len()).map_err(|error| {
-        with_hint(
-            anyhow::Error::new(error),
-            format!(
-                "the input has {}",
-                render::describe_count(levels.len(), "level", "levels")
-            ),
-        )
-    })?;
-
-    // Parse errors are reported before any search starts, so the workers never
-    // have to deal with them.
-    for &index in &selected {
-        if let Err(error) = &levels[index] {
-            return Err(anyhow::Error::new(error.clone())
-                .context(format!("failed to parse level {} of `{name}`", index + 1)));
-        }
-    }
-
+    let selected = input::load_levels(&args.input, &args.level)?;
     let jobs = resolve_jobs(args.jobs).min(selected.len());
     let started = Instant::now();
     let (processed, interrupted) = if jobs > 1 {
-        solve_in_parallel(&args, ctx, &levels, &selected, &name, jobs)?
+        solve_in_parallel(args, ctx, &selected, jobs)?
     } else {
-        solve_in_sequence(&args, ctx, &levels, &selected, &name)?
+        solve_in_sequence(args, ctx, &selected)?
     };
     let elapsed = started.elapsed();
 
-    render_results(&args, ctx, &processed, selected.len(), elapsed)?;
+    render_results(args, ctx, &processed, selected.len(), elapsed)?;
 
     if interrupted {
-        ctx.ui.warning("interrupted")?;
+        if !ctx.ui.is_json() {
+            ctx.ui.warning("interrupted")?;
+        }
         return Ok(ExitCode::from(error::EXIT_INTERRUPT));
     }
     Ok(ExitCode::from(error::EXIT_SUCCESS))
 }
 
-/// A parsed level of an input.
-type LevelResult = std::result::Result<Level, ParseLevelError>;
-
 /// Resolves the `--jobs` option into a number of worker threads.
 fn resolve_jobs(jobs: usize) -> usize {
     if jobs == 0 {
-        thread::available_parallelism().map_or(1, |count| count.get())
+        thread::available_parallelism().map_or(1, NonZero::get)
     } else {
         jobs
     }
-}
-
-/// Returns a selected level, which was validated before the searches.
-fn parsed_level(level: &LevelResult) -> &Level {
-    level.as_ref().expect("selected levels are parsed")
 }
 
 /// Solves the selected levels one after another.
 fn solve_in_sequence<'a>(
     args: &Args,
     ctx: &mut Ctx,
-    levels: &'a [LevelResult],
-    selected: &[usize],
-    name: &str,
+    selected: &'a [SelectedLevel],
 ) -> Result<(Vec<Processed<'a>>, bool)> {
     let total = selected.len();
     let bar = Progress::new(&ctx.ui, progress::enabled(&ctx.ui), total as u64, 1);
@@ -145,40 +111,23 @@ fn solve_in_sequence<'a>(
     let mut processed = Vec::with_capacity(total);
     let mut interrupted = false;
 
-    for &index in selected {
+    for entry in selected {
         if ctx.cancel.is_requested() {
             interrupted = true;
             break;
         }
-        let level = parsed_level(&levels[index]);
         // Levels that are already solved do not start a search, so their
         // statistics are never reported.
-        if let Some(line) = &line {
-            line.set_message(progress::level_label(index + 1));
-        } else {
-            bar.set_message(progress::level_label(index + 1));
-        }
-        let mut reporter = match &line {
-            Some(line) => SearchReporter::line(&bar, Some(line), index + 1),
-            None => SearchReporter::single(&bar, index + 1),
-        };
-        let outcome = match solve_level(level, args, &ctx.cancel, &mut reporter)? {
-            Some(outcome) => outcome,
-            None => {
-                interrupted = true;
-                break;
-            }
+        let mut reporter = bar.begin_level(line.as_ref(), entry.number());
+        let Some(outcome) = solve_level(&entry.level, args, &ctx.cancel, &mut reporter)? else {
+            interrupted = true;
+            break;
         };
         if matches!(outcome, Outcome::Solved { .. }) {
             bar.suspend(|| ctx.ui.debug("solution replay verified"))?;
         }
         bar.set_completed(processed.len() as u64 + 1);
-        processed.push(Processed {
-            index,
-            title: resolve_title(level, name, index),
-            level,
-            outcome,
-        });
+        processed.push(Processed { entry, outcome });
     }
     bar.finish();
     Ok((processed, interrupted))
@@ -192,9 +141,7 @@ fn solve_in_sequence<'a>(
 fn solve_in_parallel<'a>(
     args: &Args,
     ctx: &mut Ctx,
-    levels: &'a [LevelResult],
-    selected: &[usize],
-    name: &str,
+    selected: &'a [SelectedLevel],
     jobs: usize,
 ) -> Result<(Vec<Processed<'a>>, bool)> {
     let total = selected.len();
@@ -206,9 +153,9 @@ fn solve_in_parallel<'a>(
         .map(|_| None)
         .collect::<Vec<Option<Processed<'a>>>>();
     let mut completed = 0u64;
-    let mut failure = None;
+    let mut failure: Option<anyhow::Error> = None;
 
-    thread::scope(|scope| -> Result<()> {
+    thread::scope(|scope| {
         for worker in 0..jobs {
             let sender = sender.clone();
             let cancel = cancel.clone();
@@ -220,15 +167,11 @@ fn solve_in_parallel<'a>(
                 let line = bar.level_line(worker);
                 while !cancel.is_requested() {
                     let position = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&index) = selected.get(position) else {
+                    let Some(entry) = selected.get(position) else {
                         break;
                     };
-                    let level = parsed_level(&levels[index]);
-                    if let Some(line) = &line {
-                        line.set_message(progress::level_label(index + 1));
-                    }
-                    let mut reporter = SearchReporter::line(bar, line.as_ref(), index + 1);
-                    let outcome = match solve_level(level, args, &cancel, &mut reporter) {
+                    let mut reporter = bar.begin_level(line.as_ref(), entry.number());
+                    let outcome = match solve_level(&entry.level, args, &cancel, &mut reporter) {
                         Ok(Some(outcome)) => outcome,
                         // Stopped by the user; the level is not reported.
                         Ok(None) => break,
@@ -250,15 +193,18 @@ fn solve_in_parallel<'a>(
         for message in receiver {
             match message {
                 Ok((position, outcome)) => {
-                    let index = selected[position];
-                    let level = parsed_level(&levels[index]);
-                    if matches!(outcome, Outcome::Solved { .. }) {
-                        bar.suspend(|| ctx.ui.debug("solution replay verified"))?;
+                    if failure.is_some() {
+                        continue;
+                    }
+                    if matches!(outcome, Outcome::Solved { .. })
+                        && let Err(error) = bar.suspend(|| ctx.ui.debug("solution replay verified"))
+                    {
+                        failure = Some(error.into());
+                        cancel.request();
+                        continue;
                     }
                     slots[position] = Some(Processed {
-                        index,
-                        title: resolve_title(level, name, index),
-                        level,
+                        entry: &selected[position],
                         outcome,
                     });
                     completed += 1;
@@ -267,13 +213,12 @@ fn solve_in_parallel<'a>(
                 Err(error) => {
                     // Stop the remaining workers; their levels are not
                     // reported.
-                    failure = Some(error);
+                    failure.get_or_insert(error);
                     cancel.request();
                 }
             }
         }
-        Ok(())
-    })?;
+    });
     bar.finish();
 
     if let Some(error) = failure {
@@ -285,10 +230,7 @@ fn solve_in_parallel<'a>(
 
 /// A processed level of the current run.
 struct Processed<'a> {
-    /// The 0-based level index in the input.
-    index: usize,
-    title: String,
-    level: &'a Level,
+    entry: &'a SelectedLevel,
     outcome: Outcome,
 }
 
@@ -308,7 +250,7 @@ enum Outcome {
 }
 
 impl Outcome {
-    fn status(&self) -> SolveStatus {
+    const fn status(&self) -> SolveStatus {
         match self {
             Self::AlreadySolved => SolveStatus::AlreadySolved,
             Self::Solved { .. } => SolveStatus::Solved,
@@ -317,14 +259,14 @@ impl Outcome {
         }
     }
 
-    fn actions(&self) -> Option<&Actions> {
+    const fn actions(&self) -> Option<&Actions> {
         match self {
             Self::Solved { actions, .. } => Some(actions),
-            _ => None,
+            Self::AlreadySolved | Self::NoSolution { .. } | Self::Timeout { .. } => None,
         }
     }
 
-    fn stats(&self) -> Option<SearchStats> {
+    const fn stats(&self) -> Option<SearchStats> {
         match self {
             Self::AlreadySolved => None,
             Self::Solved { stats, .. } | Self::NoSolution { stats } | Self::Timeout { stats } => {
@@ -333,7 +275,7 @@ impl Outcome {
         }
     }
 
-    fn is_solved(&self) -> bool {
+    const fn is_solved(&self) -> bool {
         matches!(self, Self::Solved { .. } | Self::AlreadySolved)
     }
 }
@@ -347,20 +289,24 @@ fn solve_level(
     cancel: &Cancellation,
     reporter: &mut SearchReporter<'_>,
 ) -> Result<Option<Outcome>> {
+    if cancel.is_requested() {
+        return Ok(None);
+    }
     if level.is_solved() {
         return Ok(Some(Outcome::AlreadySolved));
     }
 
     let solver = Solver::new(level.map().clone(), args.strategy.into());
+    if cancel.is_requested() {
+        return Ok(None);
+    }
 
-    let _watchdog = Watchdog::spawn(
-        &solver,
-        cancel,
-        args.timeout.map(|timeout| Instant::now() + timeout),
-    );
-
+    let deadline = args
+        .timeout
+        .and_then(|timeout| Instant::now().checked_add(timeout));
     let started = Instant::now();
-    let result = solver.search_with_observer(args.algorithm.into(), reporter);
+    let mut observer = (&mut *reporter, StopGuard::new(&solver, cancel, deadline));
+    let result = solver.search_with_observer(args.algorithm.into(), &mut observer);
     let stats = SearchStats {
         expansions: reporter.expansions(),
         elapsed: started.elapsed(),
@@ -386,7 +332,7 @@ fn solve_level(
 fn verify_solution(level: &Level, actions: &Actions) -> Result<()> {
     let mut replay = level.clone();
     let valid = replay
-        .execute_batch(actions.iter().map(|action| action.direction()))
+        .execute_batch(actions.iter().map(Action::direction))
         .is_ok()
         && replay.is_solved();
     if !valid {
@@ -399,54 +345,44 @@ fn verify_solution(level: &Level, actions: &Actions) -> Result<()> {
 }
 
 /// Stops the solver when the cancellation flag is set or the deadline passes.
-struct Watchdog {
-    done: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+struct StopGuard<'a> {
+    solver: &'a Solver,
+    cancel: &'a Cancellation,
+    deadline: Option<Instant>,
+    stopped: bool,
 }
 
-impl Watchdog {
-    fn spawn(solver: &Solver, cancel: &Cancellation, deadline: Option<Instant>) -> Self {
-        let done = Arc::new(AtomicBool::new(false));
-        let handle = std::thread::spawn({
-            let done = Arc::clone(&done);
-            let cancel = cancel.clone();
-            let solver = solver.clone();
-            move || {
-                // The stop flag is re-armed on every poll: the search resets it
-                // when it starts, so a single request may arrive too early.
-                while !done.load(Ordering::Relaxed) {
-                    if cancel.is_requested()
-                        || deadline.is_some_and(|deadline| Instant::now() >= deadline)
-                    {
-                        solver.request_stop();
-                    }
-                    std::thread::sleep(WATCHDOG_INTERVAL);
-                }
-            }
-        });
+impl<'a> StopGuard<'a> {
+    const fn new(solver: &'a Solver, cancel: &'a Cancellation, deadline: Option<Instant>) -> Self {
         Self {
-            done,
-            handle: Some(handle),
+            solver,
+            cancel,
+            deadline,
+            stopped: false,
+        }
+    }
+
+    fn check(&mut self) {
+        if !self.stopped
+            && (self.cancel.is_requested()
+                || self
+                    .deadline
+                    .is_some_and(|deadline| Instant::now() >= deadline))
+        {
+            self.stopped = true;
+            self.solver.request_stop();
         }
     }
 }
 
-impl Drop for Watchdog {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+impl Observer for StopGuard<'_> {
+    fn on_node_expanded(&mut self, _node: &Node) {
+        self.check();
     }
-}
 
-/// Returns the display title of a level.
-fn resolve_title(level: &Level, input_name: &str, index: usize) -> String {
-    level
-        .metadata()
-        .get("title")
-        .cloned()
-        .unwrap_or_else(|| format!("{input_name} #{}", index + 1))
+    fn on_successor(&mut self, _parent: &Node, _child: &Node) {
+        self.check();
+    }
 }
 
 /// Writes the results of the run.
@@ -459,13 +395,13 @@ fn render_results(
 ) -> Result<()> {
     let reports = processed
         .iter()
-        .map(|entry| LevelReport {
-            number: entry.index + 1,
-            title: &entry.title,
-            map: entry.level.map(),
-            status: entry.outcome.status(),
-            actions: entry.outcome.actions(),
-            stats: entry.outcome.stats(),
+        .map(|item| LevelReport {
+            number: item.entry.number(),
+            title: &item.entry.title,
+            map: item.entry.level.map(),
+            status: item.outcome.status(),
+            actions: item.outcome.actions(),
+            stats: item.outcome.stats(),
         })
         .collect::<Vec<_>>();
 
@@ -480,7 +416,7 @@ fn render_results(
             &mut ctx.ui,
             &reports[0],
             args.algorithm.display_name(),
-            &args.strategy.to_string(),
+            args.strategy.id(),
             args.timeout,
         )?;
         return Ok(());
@@ -574,14 +510,9 @@ impl Search {
             algorithm,
             strategy,
             expansions: stats.expansions,
-            elapsed_ms: elapsed_ms(stats.elapsed),
+            elapsed_ms: json::elapsed_ms(stats.elapsed),
         }
     }
-}
-
-/// Converts a duration to milliseconds, rounded to microsecond precision.
-fn elapsed_ms(duration: Duration) -> f64 {
-    (duration.as_secs_f64() * 1_000_000.0).round() / 1000.0
 }
 
 /// The summary of a run in the JSON output.
@@ -597,8 +528,8 @@ fn build_body<'a>(args: &Args, processed: &'a [Processed<'_>], elapsed: Duration
     let strategy = args.strategy.id();
     let results = processed
         .iter()
-        .map(|entry| {
-            let (status, solution, search) = match &entry.outcome {
+        .map(|item| {
+            let (status, solution, search) = match &item.outcome {
                 Outcome::AlreadySolved => (
                     "solved",
                     Some(Solution::from_actions(&Actions::new())),
@@ -621,10 +552,10 @@ fn build_body<'a>(args: &Args, processed: &'a [Processed<'_>], elapsed: Duration
                 ),
             };
             ResultEntry {
-                index: entry.index + 1,
-                title: &entry.title,
+                index: item.entry.number(),
+                title: &item.entry.title,
                 status,
-                metadata: entry.level.metadata(),
+                metadata: item.entry.level.metadata(),
                 solution,
                 search,
                 error: None,
@@ -637,9 +568,9 @@ fn build_body<'a>(args: &Args, processed: &'a [Processed<'_>], elapsed: Duration
             levels: processed.len(),
             solved: processed
                 .iter()
-                .filter(|entry| entry.outcome.is_solved())
+                .filter(|item| item.outcome.is_solved())
                 .count(),
-            elapsed_ms: elapsed_ms(elapsed),
+            elapsed_ms: json::elapsed_ms(elapsed),
         },
     }
 }

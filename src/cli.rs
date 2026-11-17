@@ -1,8 +1,10 @@
 //! The command line interface definition.
 
-use std::{fmt, time::Duration};
+use std::{ffi::OsString, fmt, time::Duration};
 
-use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Subcommand, ValueEnum};
+use clap::{
+    ArgAction, Args, CommandFactory, FromArgMatches, Subcommand, ValueEnum, error::ErrorKind,
+};
 
 use crate::commands::{search, solve};
 
@@ -20,10 +22,37 @@ pub struct Cli {
 impl Cli {
     /// Parses the command line, exiting on usage errors and `--help`.
     pub fn parse() -> Self {
-        let matches = <Self as CommandFactory>::command()
-            .bin_name("soukoban")
-            .get_matches();
-        <Self as FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+        Self::try_parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit())
+    }
+
+    /// Parses an argument iterator and validates cross-option constraints.
+    pub fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let mut command = <Self as CommandFactory>::command().bin_name("soukoban");
+        let matches = command.try_get_matches_from_mut(itr)?;
+        let cli = <Self as FromArgMatches>::from_arg_matches(&matches)
+            .map_err(|error| error.format(&mut command))?;
+        cli.validate(&mut command)?;
+        Ok(cli)
+    }
+
+    fn validate(&self, command: &mut clap::Command) -> Result<(), clap::Error> {
+        if let Command::Solve(args) = &self.command
+            && args.algorithm == Algorithm::Bfs
+            && args.strategy == Strategy::MoveOptimal
+        {
+            let target = command
+                .find_subcommand_mut("solve")
+                .expect("the solve subcommand exists");
+            return Err(target.error(
+                ErrorKind::ArgumentConflict,
+                "`--algorithm bfs` cannot be used with `--strategy move-optimal`",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -144,7 +173,7 @@ pub enum Algorithm {
 
 impl Algorithm {
     /// Returns the identifier used by the library and the JSON output.
-    pub fn id(self) -> &'static str {
+    pub const fn id(self) -> &'static str {
         match self {
             Self::Astar => "astar",
             Self::IdaStar => "ida-star",
@@ -153,7 +182,7 @@ impl Algorithm {
     }
 
     /// Returns the name used in human readable output.
-    pub fn display_name(self) -> &'static str {
+    pub const fn display_name(self) -> &'static str {
         match self {
             Self::Astar => "A*",
             Self::IdaStar => "IDA*",
@@ -191,7 +220,7 @@ pub enum Strategy {
 
 impl Strategy {
     /// Returns the identifier used by the JSON output.
-    pub fn id(self) -> &'static str {
+    pub const fn id(self) -> &'static str {
         match self {
             Self::Quick => "quick",
             Self::PushOptimal => "push-optimal",
@@ -238,7 +267,12 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
     if !seconds.is_finite() || seconds <= 0.0 {
         return Err(format!("duration must be positive: `{text}`"));
     }
-    Ok(Duration::from_secs_f64(seconds))
+    let duration = Duration::try_from_secs_f64(seconds)
+        .map_err(|_| format!("duration `{text}` is out of range"))?;
+    if duration.is_zero() {
+        return Err(format!("duration must be positive: `{text}`"));
+    }
+    Ok(duration)
 }
 
 #[cfg(test)]
@@ -257,11 +291,37 @@ mod tests {
 
     #[test]
     fn rejects_invalid_durations() {
-        for text in ["", "abc", "0", "-5", "1x", "1..5", "s"] {
+        for text in [
+            "",
+            "abc",
+            "0",
+            "-5",
+            "1x",
+            "1..5",
+            "s",
+            "0.0000000001ms",
+            "99999999999999999999s",
+        ] {
             assert!(
                 parse_duration(text).is_err(),
                 "duration `{text}` should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn rejects_bfs_with_move_optimal_strategy() {
+        let error = Cli::try_parse_from([
+            "soukoban",
+            "solve",
+            "--algorithm",
+            "bfs",
+            "--strategy",
+            "move-optimal",
+            "levels.xsb",
+        ])
+        .err()
+        .expect("bfs with move-optimal must be rejected");
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 }
