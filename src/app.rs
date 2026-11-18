@@ -3,7 +3,7 @@
 use std::{
     process::ExitCode,
     sync::{
-        Arc, Mutex, PoisonError, Weak,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -53,6 +53,17 @@ impl Ctx {
         install_handler(&cancel).context("failed to install the ctrl+c handler")?;
         Ok(Self { ui, cancel })
     }
+
+    /// Reports interruption if needed and returns the process exit code.
+    pub fn finish(&mut self, interrupted: bool) -> error::Result<ExitCode> {
+        if interrupted {
+            if !self.ui.is_json() {
+                self.ui.warning("interrupted")?;
+            }
+            return Ok(ExitCode::from(EXIT_INTERRUPT));
+        }
+        Ok(ExitCode::from(error::EXIT_SUCCESS))
+    }
 }
 
 /// A cloneable flag signalling that the current operation should stop.
@@ -87,30 +98,17 @@ fn build_ui(global: &GlobalArgs) -> Ui {
 }
 
 fn install_handler(cancel: &Cancellation) -> Result<(), CtrlcError> {
-    static TARGET: Mutex<Weak<AtomicBool>> = Mutex::new(Weak::new());
     static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-    *TARGET.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&cancel.0);
-    INTERRUPTED.store(false, Ordering::SeqCst);
-
-    let result = ctrlc::set_handler(|| {
+    let flag = Arc::clone(&cancel.0);
+    ctrlc::set_handler(move || {
         // The first interrupt requests a graceful stop, the second one exits
         // immediately so the process cannot get stuck.
         if INTERRUPTED.swap(true, Ordering::SeqCst) {
             std::process::exit(i32::from(EXIT_INTERRUPT));
         }
-        let target = TARGET
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .upgrade();
-        if let Some(flag) = target {
-            flag.store(true, Ordering::SeqCst);
-        }
-    });
-    match result {
-        Ok(()) | Err(CtrlcError::MultipleHandlers) => Ok(()),
-        Err(error) => Err(error),
-    }
+        flag.store(true, Ordering::SeqCst);
+    })
 }
 
 fn dispatch(command: &Command, ctx: &mut Ctx) -> anyhow::Result<ExitCode> {
@@ -125,5 +123,5 @@ fn fail(error: &anyhow::Error, ui: &mut Ui) -> ExitCode {
         return ExitCode::from(error::EXIT_SUCCESS);
     }
     let _ = error::render(error, ui);
-    error::map_error(error)
+    ExitCode::from(error::EXIT_ERROR)
 }

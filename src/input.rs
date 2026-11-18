@@ -2,7 +2,6 @@
 
 use std::{
     ffi::OsString,
-    fmt::{self, Display},
     fs,
     io::{self, Read as _},
     path::PathBuf,
@@ -105,7 +104,7 @@ pub fn load_levels(input: &Input, spec: &LevelSpec) -> Result<Vec<SelectedLevel>
 
     let indices = spec.select(count).map_err(|error| {
         with_hint(
-            anyhow::Error::new(error),
+            anyhow::anyhow!(error),
             format!("the input has {}", describe_count(count, "level", "levels")),
         )
     })?;
@@ -155,7 +154,7 @@ pub fn resolve_title(level: &Level, input_name: &str, index: usize) -> String {
 
 /// One segment of a level selection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Segment {
+pub enum Segment {
     /// A single 1-based level number.
     Single(usize),
     /// An inclusive 1-based level range.
@@ -173,28 +172,31 @@ impl Segment {
 
 /// A parsed `--level` selection.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LevelSpec {
-    segments: Vec<Segment>,
-    all: bool,
+pub enum LevelSpec {
+    /// All levels in the input.
+    All,
+    /// Specific 1-based level numbers or inclusive ranges.
+    Segments(Vec<Segment>),
 }
 
 impl LevelSpec {
     /// Resolves the selection into zero-based level indices.
     ///
     /// Indices are deduplicated in selection order.
-    pub fn select(&self, count: usize) -> std::result::Result<Vec<usize>, SelectError> {
-        if self.all {
-            return Ok((0..count).collect());
-        }
+    pub fn select(&self, count: usize) -> std::result::Result<Vec<usize>, String> {
+        let segments = match self {
+            Self::All => return Ok((0..count).collect()),
+            Self::Segments(segments) => segments,
+        };
         let mut selected = Vec::new();
         let mut seen = vec![false; count];
-        for &segment in &self.segments {
+        for &segment in segments {
             let (start, end) = match segment {
                 Segment::Single(level) => (level, level),
                 Segment::Range(start, end) => (start, end),
             };
             if end > count {
-                return Err(SelectError::out_of_bounds(segment.describe()));
+                return Err(format!("{} out of bounds", segment.describe()));
             }
             for level in start..=end {
                 let index = level - 1;
@@ -212,10 +214,7 @@ impl LevelSpec {
 pub fn parse_level_spec(text: &str) -> std::result::Result<LevelSpec, String> {
     let text = text.trim();
     if text.eq_ignore_ascii_case("all") {
-        return Ok(LevelSpec {
-            segments: Vec::new(),
-            all: true,
-        });
+        return Ok(LevelSpec::All);
     }
 
     let mut segments = Vec::new();
@@ -238,10 +237,7 @@ pub fn parse_level_spec(text: &str) -> std::result::Result<LevelSpec, String> {
         };
         segments.push(segment);
     }
-    Ok(LevelSpec {
-        segments,
-        all: false,
-    })
+    Ok(LevelSpec::Segments(segments))
 }
 
 fn parse_level_number(text: &str) -> std::result::Result<usize, String> {
@@ -253,28 +249,6 @@ fn parse_level_number(text: &str) -> std::result::Result<usize, String> {
     }
     Ok(level)
 }
-
-/// An error resolving a [`LevelSpec`] against the levels of an input.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectError {
-    description: String,
-}
-
-impl SelectError {
-    fn out_of_bounds(description: impl Into<String>) -> Self {
-        Self {
-            description: description.into(),
-        }
-    }
-}
-
-impl Display for SelectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} out of bounds", self.description)
-    }
-}
-
-impl std::error::Error for SelectError {}
 
 #[cfg(test)]
 mod tests {
@@ -326,13 +300,10 @@ mod tests {
     #[test]
     fn rejects_out_of_bounds_selections() {
         assert_eq!(
-            spec("1..5").select(3).unwrap_err().to_string(),
+            spec("1..5").select(3).unwrap_err(),
             "level range 1..5 out of bounds"
         );
-        assert_eq!(
-            spec("9").select(3).unwrap_err().to_string(),
-            "level 9 out of bounds"
-        );
+        assert_eq!(spec("9").select(3).unwrap_err(), "level 9 out of bounds");
     }
 
     #[test]

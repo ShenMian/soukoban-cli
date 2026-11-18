@@ -2,10 +2,7 @@
 
 use std::{
     io::{self, IsTerminal as _},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -39,21 +36,29 @@ pub fn level_label(number: usize) -> String {
     format!("#{number:<LEVEL_WIDTH$}")
 }
 
-/// Describes the statistics of a level, padded to keep a stable layout.
-fn level_message(number: usize, expansions: u64, elapsed: Duration, sep: &str) -> String {
+/// Formats the search statistics segment of a progress line.
+fn format_stats(expansions: u64, elapsed: Duration, sep: &str) -> String {
     format!(
-        "{label}{sep}expanded {:>STAT_WIDTH$}{sep}speed {:>STAT_WIDTH$}/s{sep}elapsed {:>STAT_WIDTH$.1}s",
+        "expanded {:>STAT_WIDTH$}{sep}speed {:>STAT_WIDTH$}/s{sep}elapsed {:>STAT_WIDTH$.1}s",
         format_count(expansions),
         format_count(rate(expansions, elapsed)),
         elapsed.as_secs_f64(),
-        label = level_label(number)
+    )
+}
+
+/// Describes the statistics of a level, padded to keep a stable layout.
+fn level_message(number: usize, expansions: u64, elapsed: Duration, sep: &str) -> String {
+    format!(
+        "{}{sep}{}",
+        level_label(number),
+        format_stats(expansions, elapsed, sep)
     )
 }
 
 /// Returns whether progress reporting is enabled for the given settings.
 ///
 /// Progress is never shown for the JSON format.
-pub fn enabled(ui: &Ui) -> bool {
+fn enabled(ui: &Ui) -> bool {
     if ui.is_json() {
         return false;
     }
@@ -92,7 +97,7 @@ pub struct Progress {
     /// The number of level lines that fit below the batch line.
     lanes: usize,
     /// Expanded nodes of all levels.
-    expansions: Arc<AtomicU64>,
+    expansions: AtomicU64,
     /// When the run started.
     started: Instant,
 }
@@ -100,8 +105,8 @@ pub struct Progress {
 impl Progress {
     /// Creates the progress display of a run over `total` levels solved by
     /// `jobs` workers.
-    pub fn new(ui: &Ui, enabled: bool, total: u64, jobs: usize) -> Self {
-        let separator = ui.theme().separator();
+    pub fn new(ui: &Ui, total: u64, jobs: usize) -> Self {
+        let separator = ui.theme().glyphs.separator;
         let level_template = format!("  {{bar:14}}{separator}{{msg}}");
         let mut progress = Self {
             multi: None,
@@ -110,10 +115,10 @@ impl Progress {
             line_style: style(ui, &level_template),
             separator,
             lanes: 0,
-            expansions: Arc::new(AtomicU64::new(0)),
+            expansions: AtomicU64::new(0),
             started: Instant::now(),
         };
-        if !enabled {
+        if !enabled(ui) {
             return progress;
         }
         let target = draw_target(ui);
@@ -166,17 +171,11 @@ impl Progress {
         line: Option<&'a LevelLine>,
         number: usize,
     ) -> SearchReporter<'a> {
-        if let Some(line) = line {
-            line.set_message(level_label(number));
-        } else if let Some(single) = &self.single {
-            single.set_message(level_label(number));
+        let bar = line.map(|line| &line.bar).or(self.single.as_ref());
+        if let Some(bar) = bar {
+            bar.set_message(level_label(number));
         }
-        let target = if self.single.is_some() {
-            Target::Single
-        } else {
-            Target::Line(line)
-        };
-        SearchReporter::new(self, target, number)
+        SearchReporter::new(self, bar, number)
     }
 
     /// Runs `f` while the display is suspended, so that output written by `f`
@@ -222,34 +221,14 @@ impl Progress {
         self.expansions.fetch_add(expansions, Ordering::Relaxed);
     }
 
-    /// Updates the single-level line with the level statistics and progress.
-    fn set_single(&self, message: String, best: i32, max: i32) {
-        let Some(bar) = &self.single else {
-            return;
-        };
-        bar.set_message(message);
-        if let Some((position, length)) = heuristic_position(best, max) {
-            // The position must be set first: `set_length` redraws the bar,
-            // while `set_position` defers to the steady tick.
-            bar.set_position(position);
-            bar.set_length(length);
-        }
-    }
-
     /// Updates the batch message with the run totals.
     fn set_totals(&self) {
         let Some(bar) = &self.batch else {
             return;
         };
-        let sep = self.separator;
         let elapsed = self.started.elapsed();
         let expansions = self.expansions.load(Ordering::Relaxed);
-        bar.set_message(format!(
-            "expanded {:>STAT_WIDTH$}{sep}speed {:>STAT_WIDTH$}/s{sep}elapsed {:>STAT_WIDTH$.1}s",
-            format_count(expansions),
-            format_count(rate(expansions, elapsed)),
-            elapsed.as_secs_f64()
-        ));
+        bar.set_message(format_stats(expansions, elapsed, self.separator));
     }
 }
 
@@ -266,23 +245,6 @@ impl Drop for Progress {
 pub struct LevelLine {
     bar: ProgressBar,
     multi: MultiProgress,
-}
-
-impl LevelLine {
-    /// Updates the message of the line.
-    pub fn set_message(&self, message: String) {
-        self.bar.set_message(message);
-    }
-
-    /// Fills the bar to the heuristic progress of the level.
-    fn set_heuristic(&self, best: i32, max: i32) {
-        if let Some((position, length)) = heuristic_position(best, max) {
-            // The position must be set first: `set_length` redraws the bar,
-            // while `set_position` defers to the steady tick.
-            self.bar.set_position(position);
-            self.bar.set_length(length);
-        }
-    }
 }
 
 impl Drop for LevelLine {
@@ -312,8 +274,8 @@ fn heuristic_position(best: i32, max: i32) -> Option<(u64, u64)> {
 fn style(ui: &Ui, template: &str) -> ProgressStyle {
     ProgressStyle::with_template(template)
         .expect("progress template is valid")
-        .progress_chars(ui.theme().bar_chars())
-        .tick_chars(ui.theme().ticks())
+        .progress_chars(ui.theme().glyphs.bar_chars)
+        .tick_chars(ui.theme().glyphs.ticks)
 }
 
 /// Builds a progress bar with the application style.
@@ -343,19 +305,10 @@ fn level_lanes() -> usize {
     rows.saturating_sub(2).max(1)
 }
 
-/// Where a [`SearchReporter`] writes its message.
-#[derive(Clone, Copy)]
-enum Target<'a> {
-    /// The line of a run over a single level.
-    Single,
-    /// A level line below the batch line.
-    Line(Option<&'a LevelLine>),
-}
-
 /// The observer that counts expanded nodes and updates the progress message.
 pub struct SearchReporter<'a> {
     progress: &'a Progress,
-    target: Target<'a>,
+    bar: Option<&'a ProgressBar>,
     enabled: bool,
     number: usize,
     expansions: u64,
@@ -370,11 +323,11 @@ pub struct SearchReporter<'a> {
 }
 
 impl<'a> SearchReporter<'a> {
-    fn new(progress: &'a Progress, target: Target<'a>, number: usize) -> Self {
+    fn new(progress: &'a Progress, bar: Option<&'a ProgressBar>, number: usize) -> Self {
         let now = Instant::now();
         Self {
             progress,
-            target,
+            bar,
             enabled: progress.is_enabled(),
             number,
             expansions: 0,
@@ -397,30 +350,28 @@ impl<'a> SearchReporter<'a> {
         }
         let now = Instant::now();
         self.last_refresh = now;
-        let elapsed = now.saturating_duration_since(self.started);
-        let message = level_message(
-            self.number,
-            self.expansions,
-            elapsed,
-            self.progress.separator,
-        );
-        match self.target {
-            Target::Single => {
-                self.progress
-                    .set_single(message, self.best_heuristic, self.max_heuristic);
+        if let Some(bar) = self.bar {
+            let elapsed = now.saturating_duration_since(self.started);
+            bar.set_message(level_message(
+                self.number,
+                self.expansions,
+                elapsed,
+                self.progress.separator,
+            ));
+            if let Some((position, length)) =
+                heuristic_position(self.best_heuristic, self.max_heuristic)
+            {
+                // The position must be set first: `set_length` redraws the
+                // bar, while `set_position` defers to the steady tick.
+                bar.set_position(position);
+                bar.set_length(length);
             }
-            Target::Line(line) => {
-                if let Some(line) = line {
-                    line.set_message(message);
-                    line.set_heuristic(self.best_heuristic, self.max_heuristic);
-                }
-                if self.expansions > self.reported {
-                    self.progress
-                        .add_expansions(self.expansions - self.reported);
-                    self.reported = self.expansions;
-                    self.progress.set_totals();
-                }
-            }
+        }
+        if self.progress.batch.is_some() && self.expansions > self.reported {
+            self.progress
+                .add_expansions(self.expansions - self.reported);
+            self.reported = self.expansions;
+            self.progress.set_totals();
         }
     }
 }

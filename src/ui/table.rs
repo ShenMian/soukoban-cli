@@ -27,16 +27,16 @@ pub enum Align {
 /// A table column.
 #[derive(Clone, Debug)]
 pub struct Column {
-    header: String,
+    header: &'static str,
     align: Align,
     shrink: bool,
 }
 
 impl Column {
     /// Creates a column with the given header and alignment.
-    pub fn new(header: impl Into<String>, align: Align) -> Self {
+    pub const fn new(header: &'static str, align: Align) -> Self {
         Self {
-            header: header.into(),
+            header,
             align,
             shrink: false,
         }
@@ -127,7 +127,7 @@ impl Table {
             .iter()
             .enumerate()
             .map(|(index, column)| {
-                let header = display_width(&column.header);
+                let header = display_width(column.header);
                 self.rows
                     .iter()
                     .map(|row| display_width(&row[index].text))
@@ -142,7 +142,7 @@ impl Table {
                 .iter()
                 .zip(&widths)
                 .map(|(column, &width)| Cell {
-                    text: pad(&column.header, width, column.align, theme.ellipsis()),
+                    text: pad(column.header, width, column.align, theme.glyphs.ellipsis),
                     style: Some(theme.label),
                 })
                 .collect(),
@@ -153,7 +153,7 @@ impl Table {
                     .zip(&self.columns)
                     .zip(&widths)
                     .map(|((cell, column), &width)| Cell {
-                        text: pad(&cell.text, width, column.align, theme.ellipsis()),
+                        text: pad(&cell.text, width, column.align, theme.glyphs.ellipsis),
                         style: cell.style,
                     })
                     .collect(),

@@ -1,6 +1,6 @@
 //! Error wrapping, rendering, and process exit codes.
 
-use std::{error::Error, fmt, io, process::ExitCode};
+use std::{error::Error, fmt, io};
 
 use crate::ui::Ui;
 
@@ -80,11 +80,6 @@ pub fn is_broken_pipe(error: &anyhow::Error) -> bool {
             .downcast_ref::<io::Error>()
             .is_some_and(|io_error| io_error.kind() == io::ErrorKind::BrokenPipe)
     })
-}
-
-/// Maps a runtime error to a process exit code.
-pub fn map_error(_error: &anyhow::Error) -> ExitCode {
-    ExitCode::from(EXIT_ERROR)
 }
 
 #[cfg(test)]

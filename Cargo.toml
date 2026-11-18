@@ -20,7 +20,7 @@ soukoban = { git = "https://github.com/ShenMian/soukoban" }
 anstream = "1"
 anstyle = "1"
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap = { version = "4", features = ["derive", "wrap_help"] }
 console = "0.16"
 ctrlc = "3"
 indicatif = "0.18"
@@ -31,7 +31,6 @@ unicode-width = "0.2"
 [dev-dependencies]
 assert_cmd = "2"
 insta = { version = "1", features = ["filters"] }
-predicates = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

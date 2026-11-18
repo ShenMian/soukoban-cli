@@ -1,6 +1,6 @@
 //! The command line interface definition.
 
-use std::{ffi::OsString, fmt, time::Duration};
+use std::{ffi::OsString, time::Duration};
 
 use clap::{
     ArgAction, Args, CommandFactory, FromArgMatches, Subcommand, ValueEnum, error::ErrorKind,
@@ -98,15 +98,6 @@ pub enum Format {
     Json,
 }
 
-impl fmt::Display for Format {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Human => "human",
-            Self::Json => "json",
-        })
-    }
-}
-
 /// When to use colored output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ColorChoice {
@@ -116,16 +107,6 @@ pub enum ColorChoice {
     Always,
     /// Never colorize.
     Never,
-}
-
-impl fmt::Display for ColorChoice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Auto => "auto",
-            Self::Always => "always",
-            Self::Never => "never",
-        })
-    }
 }
 
 impl From<ColorChoice> for anstream::ColorChoice {
@@ -148,16 +129,6 @@ pub enum ProgressChoice {
     Always,
     /// Never show progress.
     Never,
-}
-
-impl fmt::Display for ProgressChoice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Auto => "auto",
-            Self::Always => "always",
-            Self::Never => "never",
-        })
-    }
 }
 
 /// The search algorithm.
@@ -191,12 +162,6 @@ impl Algorithm {
     }
 }
 
-impl fmt::Display for Algorithm {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.id())
-    }
-}
-
 impl From<Algorithm> for soukoban::solver::Algorithm {
     fn from(algorithm: Algorithm) -> Self {
         match algorithm {
@@ -226,12 +191,6 @@ impl Strategy {
             Self::PushOptimal => "push-optimal",
             Self::MoveOptimal => "move-optimal",
         }
-    }
-}
-
-impl fmt::Display for Strategy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.id())
     }
 }
 

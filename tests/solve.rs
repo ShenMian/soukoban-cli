@@ -526,19 +526,8 @@ fn single_level_progress_shows_the_heuristic_bar() {
 
 #[test]
 fn parallel_runs_keep_the_selection_order() {
-    let output = Command::cargo_bin("soukoban")
-        .expect("the binary is built")
-        .args([
-            "--color",
-            "never",
-            "--progress",
-            "never",
-            "solve",
-            "-j",
-            "4",
-            "--format",
-            "json",
-        ])
+    let output = command()
+        .args(["solve", "-j", "4", "--format", "json"])
         .arg(fixture("basic.xsb"))
         .output()
         .expect("the command runs");

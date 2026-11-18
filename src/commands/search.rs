@@ -14,7 +14,7 @@ use soukoban::prelude::*;
 
 use crate::{
     app::{Cancellation, Ctx},
-    error::{self, Result, with_hint},
+    error::{Result, with_hint},
     input::{self, Input, LevelSpec, SelectedLevel},
     ui::{
         json,
@@ -62,16 +62,11 @@ pub fn run(args: &Args, ctx: &mut Ctx) -> Result<ExitCode> {
         elapsed,
     )?;
 
-    if outcome.interrupted {
-        if !ctx.ui.is_json() {
-            ctx.ui.warning("interrupted")?;
-        }
-        return Ok(ExitCode::from(error::EXIT_INTERRUPT));
-    }
-    Ok(ExitCode::from(error::EXIT_SUCCESS))
+    ctx.finish(outcome.interrupted)
 }
 
 /// A matching level found in the directory.
+#[derive(Serialize)]
 struct Match {
     file: String,
     index: usize,
@@ -104,12 +99,13 @@ fn search_directory(
     index: &FxHashMap<Map, Vec<usize>>,
     cancel: &Cancellation,
 ) -> Result<SearchOutcome> {
-    let (paths, mut warnings, mut interrupted) = xsb_files(&args.dir, cancel)?;
+    let (paths, mut warnings) = xsb_files(&args.dir, cancel)?;
     let mut matches = (0..query_count).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut summary = Summary {
         patterns: query_count,
         ..Summary::default()
     };
+    let mut interrupted = cancel.is_requested();
 
     'files: for path in paths {
         if interrupted || cancel.is_requested() {
@@ -171,9 +167,8 @@ fn search_directory(
     })
 }
 
-/// Returns every `.xsb` file below `root`, sorted by path, and whether the
-/// traversal was interrupted.
-fn xsb_files(root: &Path, cancel: &Cancellation) -> Result<(Vec<PathBuf>, Vec<String>, bool)> {
+/// Returns every `.xsb` file below `root`, sorted by path.
+fn xsb_files(root: &Path, cancel: &Cancellation) -> Result<(Vec<PathBuf>, Vec<String>)> {
     let metadata = fs::metadata(root)
         .with_context(|| format!("failed to read directory `{}`", root.display()))
         .map_err(|error| with_hint(error, "check the directory path"))?;
@@ -190,8 +185,7 @@ fn xsb_files(root: &Path, cancel: &Cancellation) -> Result<(Vec<PathBuf>, Vec<St
 
     while let Some(dir) = pending.pop() {
         if cancel.is_requested() {
-            files.sort();
-            return Ok((files, warnings, true));
+            return Ok((files, warnings));
         }
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -206,8 +200,7 @@ fn xsb_files(root: &Path, cancel: &Cancellation) -> Result<(Vec<PathBuf>, Vec<St
         };
         for entry in entries {
             if cancel.is_requested() {
-                files.sort();
-                return Ok((files, warnings, true));
+                return Ok((files, warnings));
             }
             let entry = match entry {
                 Ok(entry) => entry,
@@ -233,7 +226,7 @@ fn xsb_files(root: &Path, cancel: &Cancellation) -> Result<(Vec<PathBuf>, Vec<St
     }
 
     files.sort();
-    Ok((files, warnings, false))
+    Ok((files, warnings))
 }
 
 /// Returns `true` if `path` has the `.xsb` extension, ignoring ASCII case.
@@ -270,19 +263,11 @@ fn render_results(
         let body = Body {
             results: queries
                 .iter()
-                .enumerate()
-                .map(|(query_index, query)| ResultEntry {
+                .zip(matches)
+                .map(|(query, entries)| ResultEntry {
                     index: query.number(),
                     title: &query.title,
-                    matches: matches[query_index]
-                        .iter()
-                        .map(|entry| MatchEntry {
-                            file: &entry.file,
-                            index: entry.index,
-                            title: entry.title.as_deref(),
-                            metadata: &entry.metadata,
-                        })
-                        .collect(),
+                    matches: entries,
                 })
                 .collect(),
             summary,
@@ -302,8 +287,7 @@ fn render_results(
         Column::new("Level", Align::Right),
         Column::new("Title", Align::Left).shrinkable(),
     ]);
-    for (query_index, query) in queries.iter().enumerate() {
-        let entries = &matches[query_index];
+    for (query, entries) in queries.iter().zip(matches) {
         if entries.is_empty() {
             table.push_row([
                 Cell::new(query.number().to_string()),
@@ -354,7 +338,7 @@ fn render_results(
     parts.push(format_elapsed(elapsed));
 
     let style = ctx.ui.theme().muted;
-    let sep = ctx.ui.theme().separator();
+    let sep = ctx.ui.theme().glyphs.separator;
     writeln!(ctx.ui.err(), "{style}{}{style:#}", parts.join(sep))?;
     Ok(())
 }
@@ -371,16 +355,7 @@ struct Body<'a> {
 struct ResultEntry<'a> {
     index: usize,
     title: &'a str,
-    matches: Vec<MatchEntry<'a>>,
-}
-
-/// A matching level in the JSON output.
-#[derive(Serialize)]
-struct MatchEntry<'a> {
-    file: &'a str,
-    index: usize,
-    title: Option<&'a str>,
-    metadata: &'a BTreeMap<String, String>,
+    matches: &'a [Match],
 }
 
 /// The summary of a run in the JSON output.

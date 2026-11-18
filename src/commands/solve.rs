@@ -21,12 +21,12 @@ use soukoban::{
 use crate::{
     app::{Cancellation, Ctx},
     cli::{Algorithm, Strategy},
-    error::{self, Result, with_hint},
+    error::{Result, with_hint},
     input::{self, Input, LevelSpec, SelectedLevel},
     ui::{
         json,
-        progress::{self, Progress, SearchReporter},
-        render::{self, LevelReport, SearchStats, SolveStatus, SolveSummary},
+        progress::{Progress, SearchReporter},
+        render::{self, LevelReport, SearchStats, SolveOutcome, SolveSummary},
     },
 };
 
@@ -65,10 +65,6 @@ pub struct Args {
 
 /// Runs the `solve` command.
 pub fn run(args: &Args, ctx: &mut Ctx) -> Result<ExitCode> {
-    if args.algorithm == Algorithm::Bfs && args.strategy == Strategy::MoveOptimal {
-        anyhow::bail!("`--algorithm bfs` cannot be used with `--strategy move-optimal`");
-    }
-
     let selected = input::load_levels(&args.input, &args.level)?;
     let jobs = resolve_jobs(args.jobs).min(selected.len());
     let started = Instant::now();
@@ -81,13 +77,7 @@ pub fn run(args: &Args, ctx: &mut Ctx) -> Result<ExitCode> {
 
     render_results(args, ctx, &processed, selected.len(), elapsed)?;
 
-    if interrupted {
-        if !ctx.ui.is_json() {
-            ctx.ui.warning("interrupted")?;
-        }
-        return Ok(ExitCode::from(error::EXIT_INTERRUPT));
-    }
-    Ok(ExitCode::from(error::EXIT_SUCCESS))
+    ctx.finish(interrupted)
 }
 
 /// Resolves the `--jobs` option into a number of worker threads.
@@ -106,7 +96,7 @@ fn solve_in_sequence<'a>(
     selected: &'a [SelectedLevel],
 ) -> Result<(Vec<Processed<'a>>, bool)> {
     let total = selected.len();
-    let bar = Progress::new(&ctx.ui, progress::enabled(&ctx.ui), total as u64, 1);
+    let bar = Progress::new(&ctx.ui, total as u64, 1);
     let line = bar.level_line(0);
     let mut processed = Vec::with_capacity(total);
     let mut interrupted = false;
@@ -123,7 +113,7 @@ fn solve_in_sequence<'a>(
             interrupted = true;
             break;
         };
-        if matches!(outcome, Outcome::Solved { .. }) {
+        if matches!(outcome, SolveOutcome::Solved { .. }) {
             bar.suspend(|| ctx.ui.debug("solution replay verified"))?;
         }
         bar.set_completed(processed.len() as u64 + 1);
@@ -145,7 +135,7 @@ fn solve_in_parallel<'a>(
     jobs: usize,
 ) -> Result<(Vec<Processed<'a>>, bool)> {
     let total = selected.len();
-    let bar = Progress::new(&ctx.ui, progress::enabled(&ctx.ui), total as u64, jobs);
+    let bar = Progress::new(&ctx.ui, total as u64, jobs);
     let cancel = ctx.cancel.clone();
     let next = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel();
@@ -196,7 +186,7 @@ fn solve_in_parallel<'a>(
                     if failure.is_some() {
                         continue;
                     }
-                    if matches!(outcome, Outcome::Solved { .. })
+                    if matches!(outcome, SolveOutcome::Solved { .. })
                         && let Err(error) = bar.suspend(|| ctx.ui.debug("solution replay verified"))
                     {
                         failure = Some(error.into());
@@ -231,53 +221,7 @@ fn solve_in_parallel<'a>(
 /// A processed level of the current run.
 struct Processed<'a> {
     entry: &'a SelectedLevel,
-    outcome: Outcome,
-}
-
-/// The outcome of solving one level.
-enum Outcome {
-    AlreadySolved,
-    Solved {
-        actions: Actions,
-        stats: SearchStats,
-    },
-    NoSolution {
-        stats: SearchStats,
-    },
-    Timeout {
-        stats: SearchStats,
-    },
-}
-
-impl Outcome {
-    const fn status(&self) -> SolveStatus {
-        match self {
-            Self::AlreadySolved => SolveStatus::AlreadySolved,
-            Self::Solved { .. } => SolveStatus::Solved,
-            Self::NoSolution { .. } => SolveStatus::NoSolution,
-            Self::Timeout { .. } => SolveStatus::Timeout,
-        }
-    }
-
-    const fn actions(&self) -> Option<&Actions> {
-        match self {
-            Self::Solved { actions, .. } => Some(actions),
-            Self::AlreadySolved | Self::NoSolution { .. } | Self::Timeout { .. } => None,
-        }
-    }
-
-    const fn stats(&self) -> Option<SearchStats> {
-        match self {
-            Self::AlreadySolved => None,
-            Self::Solved { stats, .. } | Self::NoSolution { stats } | Self::Timeout { stats } => {
-                Some(*stats)
-            }
-        }
-    }
-
-    const fn is_solved(&self) -> bool {
-        matches!(self, Self::Solved { .. } | Self::AlreadySolved)
-    }
+    outcome: SolveOutcome,
 }
 
 /// Solves one level, reporting its progress to `reporter`.
@@ -288,12 +232,12 @@ fn solve_level(
     args: &Args,
     cancel: &Cancellation,
     reporter: &mut SearchReporter<'_>,
-) -> Result<Option<Outcome>> {
+) -> Result<Option<SolveOutcome>> {
     if cancel.is_requested() {
         return Ok(None);
     }
     if level.is_solved() {
-        return Ok(Some(Outcome::AlreadySolved));
+        return Ok(Some(SolveOutcome::AlreadySolved));
     }
 
     let solver = Solver::new(level.map().clone(), args.strategy.into());
@@ -315,14 +259,14 @@ fn solve_level(
     match result {
         Ok(actions) => {
             verify_solution(level, &actions)?;
-            Ok(Some(Outcome::Solved { actions, stats }))
+            Ok(Some(SolveOutcome::Solved { actions, stats }))
         }
-        Err(SearchError::NoSolution) => Ok(Some(Outcome::NoSolution { stats })),
+        Err(SearchError::NoSolution) => Ok(Some(SolveOutcome::NoSolution { stats })),
         Err(SearchError::Interrupted) => {
             if cancel.is_requested() {
                 Ok(None)
             } else {
-                Ok(Some(Outcome::Timeout { stats }))
+                Ok(Some(SolveOutcome::Timeout { stats }))
             }
         }
     }
@@ -393,25 +337,23 @@ fn render_results(
     total: usize,
     elapsed: Duration,
 ) -> Result<()> {
-    let reports = processed
-        .iter()
-        .map(|item| LevelReport {
-            number: item.entry.number(),
-            title: &item.entry.title,
-            map: item.entry.level.map(),
-            status: item.outcome.status(),
-            actions: item.outcome.actions(),
-            stats: item.outcome.stats(),
-        })
-        .collect::<Vec<_>>();
-
     if ctx.ui.is_json() {
         let body = build_body(args, processed, elapsed);
         json::write(&mut ctx.ui, "solve", &body)?;
         return Ok(());
     }
 
-    if total == 1 && !processed.is_empty() {
+    let reports = processed
+        .iter()
+        .map(|item| LevelReport {
+            number: item.entry.number(),
+            title: &item.entry.title,
+            map: item.entry.level.map(),
+            outcome: &item.outcome,
+        })
+        .collect::<Vec<_>>();
+
+    if total == 1 && !reports.is_empty() {
         render::solve_detail(
             &mut ctx.ui,
             &reports[0],
@@ -431,16 +373,11 @@ fn render_results(
                 total,
                 solved: reports
                     .iter()
-                    .filter(|report| {
-                        matches!(
-                            report.status,
-                            SolveStatus::Solved | SolveStatus::AlreadySolved
-                        )
-                    })
+                    .filter(|report| report.outcome.is_solved())
                     .count(),
                 expansions: reports
                     .iter()
-                    .filter_map(|report| report.stats.map(|stats| stats.expansions))
+                    .filter_map(|report| report.outcome.stats().map(|stats| stats.expansions))
                     .sum(),
                 elapsed,
             },
@@ -530,22 +467,22 @@ fn build_body<'a>(args: &Args, processed: &'a [Processed<'_>], elapsed: Duration
         .iter()
         .map(|item| {
             let (status, solution, search) = match &item.outcome {
-                Outcome::AlreadySolved => (
+                SolveOutcome::AlreadySolved => (
                     "solved",
                     Some(Solution::from_actions(&Actions::new())),
                     None,
                 ),
-                Outcome::Solved { actions, stats } => (
+                SolveOutcome::Solved { actions, stats } => (
                     "solved",
                     Some(Solution::from_actions(actions)),
                     Some(Search::new(*stats, algorithm, strategy)),
                 ),
-                Outcome::NoSolution { stats } => (
+                SolveOutcome::NoSolution { stats } => (
                     "unsolved",
                     None,
                     Some(Search::new(*stats, algorithm, strategy)),
                 ),
-                Outcome::Timeout { stats } => (
+                SolveOutcome::Timeout { stats } => (
                     "timeout",
                     None,
                     Some(Search::new(*stats, algorithm, strategy)),

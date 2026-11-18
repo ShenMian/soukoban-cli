@@ -11,6 +11,69 @@ pub enum Glyphs {
     Ascii,
 }
 
+/// Box drawing and status glyphs for a theme.
+#[derive(Clone, Copy, Debug)]
+pub struct GlyphSet {
+    /// Horizontal border character.
+    pub horizontal: char,
+    /// Vertical border character.
+    pub vertical: char,
+    /// Top left border character.
+    pub top_left: char,
+    /// Top right border character.
+    pub top_right: char,
+    /// Bottom left border character.
+    pub bottom_left: char,
+    /// Bottom right border character.
+    pub bottom_right: char,
+    /// Success glyph.
+    pub check: &'static str,
+    /// Failure glyph.
+    pub cross: &'static str,
+    /// Timeout glyph.
+    pub timeout: &'static str,
+    /// Separator between items of a line.
+    pub separator: &'static str,
+    /// Ellipsis appended to truncated text.
+    pub ellipsis: &'static str,
+    /// Progress bar characters (finished, partial, remaining).
+    pub bar_chars: &'static str,
+    /// Spinner tick characters.
+    pub ticks: &'static str,
+}
+
+const UNICODE: GlyphSet = GlyphSet {
+    horizontal: '─',
+    vertical: '│',
+    top_left: '╭',
+    top_right: '╮',
+    bottom_left: '╰',
+    bottom_right: '╯',
+    check: "✓",
+    cross: "✗",
+    timeout: "◷",
+    separator: " · ",
+    ellipsis: "…",
+    bar_chars: "█▉░",
+    ticks: "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
+};
+
+const ASCII: GlyphSet = GlyphSet {
+    horizontal: '-',
+    vertical: '|',
+    top_left: '+',
+    top_right: '+',
+    bottom_left: '+',
+    bottom_right: '+',
+    check: "v",
+    cross: "x",
+    timeout: "!",
+    separator: " - ",
+    ellipsis: "...",
+    bar_chars: "#=-",
+    ticks: "-\\|/",
+};
+
 /// The semantic style sheet and glyph set used by the UI.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
@@ -45,7 +108,8 @@ pub struct Theme {
     pub box_on_goal: Style,
     /// The player in rendered maps.
     pub player: Style,
-    glyphs: Glyphs,
+    /// Box drawing and status glyphs.
+    pub glyphs: &'static GlyphSet,
 }
 
 impl Theme {
@@ -69,111 +133,10 @@ impl Theme {
             goal: AnsiColor::Green.on_default(),
             box_on_goal: AnsiColor::BrightGreen.on_default(),
             player: AnsiColor::BrightCyan.on_default(),
-            glyphs,
-        }
-    }
-
-    /// Returns the horizontal border glyph.
-    pub const fn horizontal(&self) -> char {
-        match self.glyphs {
-            Glyphs::Unicode => '─',
-            Glyphs::Ascii => '-',
-        }
-    }
-
-    /// Returns the vertical border glyph.
-    pub const fn vertical(&self) -> char {
-        match self.glyphs {
-            Glyphs::Unicode => '│',
-            Glyphs::Ascii => '|',
-        }
-    }
-
-    /// Returns the top left border glyph.
-    pub const fn top_left(&self) -> char {
-        match self.glyphs {
-            Glyphs::Unicode => '╭',
-            Glyphs::Ascii => '+',
-        }
-    }
-
-    /// Returns the top right border glyph.
-    pub const fn top_right(&self) -> char {
-        match self.glyphs {
-            Glyphs::Unicode => '╮',
-            Glyphs::Ascii => '+',
-        }
-    }
-
-    /// Returns the bottom left border glyph.
-    pub const fn bottom_left(&self) -> char {
-        match self.glyphs {
-            Glyphs::Unicode => '╰',
-            Glyphs::Ascii => '+',
-        }
-    }
-
-    /// Returns the bottom right border glyph.
-    pub const fn bottom_right(&self) -> char {
-        match self.glyphs {
-            Glyphs::Unicode => '╯',
-            Glyphs::Ascii => '+',
-        }
-    }
-
-    /// Returns the success glyph.
-    pub const fn check(&self) -> &'static str {
-        match self.glyphs {
-            Glyphs::Unicode => "✓",
-            Glyphs::Ascii => "v",
-        }
-    }
-
-    /// Returns the failure glyph.
-    pub const fn cross(&self) -> &'static str {
-        match self.glyphs {
-            Glyphs::Unicode => "✗",
-            Glyphs::Ascii => "x",
-        }
-    }
-
-    /// Returns the timeout glyph.
-    pub const fn timeout(&self) -> &'static str {
-        match self.glyphs {
-            Glyphs::Unicode => "◷",
-            Glyphs::Ascii => "!",
-        }
-    }
-
-    /// Returns the separator between items of a line.
-    pub const fn separator(&self) -> &'static str {
-        match self.glyphs {
-            Glyphs::Unicode => " · ",
-            Glyphs::Ascii => " - ",
-        }
-    }
-
-    /// Returns the ellipsis appended to truncated text.
-    pub const fn ellipsis(&self) -> &'static str {
-        match self.glyphs {
-            Glyphs::Unicode => "…",
-            Glyphs::Ascii => "...",
-        }
-    }
-
-    /// Returns the progress bar characters (finished, partial, remaining).
-    pub const fn bar_chars(&self) -> &'static str {
-        match self.glyphs {
-            Glyphs::Unicode => "█▉░",
-            Glyphs::Ascii => "#=-",
-        }
-    }
-
-    /// Returns the spinner tick characters.
-    pub const fn ticks(&self) -> &'static str {
-        match self.glyphs {
-            Glyphs::Unicode => "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏",
-            Glyphs::Ascii => "-\\|/",
+            glyphs: match glyphs {
+                Glyphs::Unicode => &UNICODE,
+                Glyphs::Ascii => &ASCII,
+            },
         }
     }
 }
@@ -201,18 +164,18 @@ mod tests {
         let unicode = Theme::new(Glyphs::Unicode);
         let ascii = Theme::new(Glyphs::Ascii);
 
-        assert_eq!(unicode.horizontal(), '─');
-        assert_eq!(ascii.horizontal(), '-');
-        assert_eq!(unicode.top_left(), '╭');
-        assert_eq!(ascii.top_left(), '+');
-        assert_eq!(unicode.vertical(), '│');
-        assert_eq!(ascii.vertical(), '|');
-        assert_eq!(unicode.check(), "✓");
-        assert_eq!(ascii.check(), "v");
-        assert_eq!(unicode.ellipsis(), "…");
-        assert_eq!(ascii.ellipsis(), "...");
-        assert_eq!(unicode.bar_chars(), "█▉░");
-        assert_eq!(ascii.bar_chars(), "#=-");
+        assert_eq!(unicode.glyphs.horizontal, '─');
+        assert_eq!(ascii.glyphs.horizontal, '-');
+        assert_eq!(unicode.glyphs.top_left, '╭');
+        assert_eq!(ascii.glyphs.top_left, '+');
+        assert_eq!(unicode.glyphs.vertical, '│');
+        assert_eq!(ascii.glyphs.vertical, '|');
+        assert_eq!(unicode.glyphs.check, "✓");
+        assert_eq!(ascii.glyphs.check, "v");
+        assert_eq!(unicode.glyphs.ellipsis, "…");
+        assert_eq!(ascii.glyphs.ellipsis, "...");
+        assert_eq!(unicode.glyphs.bar_chars, "█▉░");
+        assert_eq!(ascii.glyphs.bar_chars, "#=-");
     }
 
     #[test]

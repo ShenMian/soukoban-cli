@@ -13,16 +13,44 @@ use crate::ui::{
 };
 
 /// The outcome of solving a single level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SolveStatus {
+#[derive(Clone, Debug)]
+pub enum SolveOutcome {
     /// The level was already solved before the search started.
     AlreadySolved,
     /// A solution was found.
-    Solved,
+    Solved {
+        /// The solution actions.
+        actions: Actions,
+        /// The search statistics.
+        stats: SearchStats,
+    },
     /// The search proved that there is no solution.
-    NoSolution,
+    NoSolution {
+        /// The search statistics.
+        stats: SearchStats,
+    },
     /// The search was stopped because the time limit was reached.
-    Timeout,
+    Timeout {
+        /// The search statistics.
+        stats: SearchStats,
+    },
+}
+
+impl SolveOutcome {
+    /// Returns `true` if the level is solved, whether before or during search.
+    pub const fn is_solved(&self) -> bool {
+        matches!(self, Self::AlreadySolved | Self::Solved { .. })
+    }
+
+    /// Returns the search statistics if a search was performed.
+    pub const fn stats(&self) -> Option<SearchStats> {
+        match self {
+            Self::AlreadySolved => None,
+            Self::Solved { stats, .. } | Self::NoSolution { stats } | Self::Timeout { stats } => {
+                Some(*stats)
+            }
+        }
+    }
 }
 
 /// Statistics of a level search.
@@ -42,12 +70,8 @@ pub struct LevelReport<'a> {
     pub title: &'a str,
     /// The initial map of the level.
     pub map: &'a Map,
-    /// The outcome of the level.
-    pub status: SolveStatus,
-    /// The solution actions, if the search found one.
-    pub actions: Option<&'a Actions>,
-    /// The search statistics, if a search was performed.
-    pub stats: Option<SearchStats>,
+    /// The outcome of solving the level.
+    pub outcome: &'a SolveOutcome,
 }
 
 /// Summary of a batch run.
@@ -73,7 +97,7 @@ pub fn solve_detail(
     budget: Option<Duration>,
 ) -> io::Result<()> {
     let theme = *ui.theme();
-    let sep = theme.separator();
+    let sep = theme.glyphs.separator;
     let writer = ui.out();
 
     write!(writer, "{s}{}{s:#}", report.title, s = theme.title)?;
@@ -85,22 +109,20 @@ pub fn solve_detail(
 
     write_map_block(writer, report.map, &theme)?;
 
-    match report.status {
-        SolveStatus::AlreadySolved => {
+    match report.outcome {
+        SolveOutcome::AlreadySolved => {
             writeln!(
                 writer,
                 "{s}{}{s:#} already solved",
-                theme.check(),
+                theme.glyphs.check,
                 s = theme.success_muted
             )?;
         }
-        SolveStatus::Solved => {
-            let actions = report.actions.expect("solved levels carry actions");
-            let stats = report.stats.expect("solved levels carry statistics");
+        SolveOutcome::Solved { actions, stats } => {
             writeln!(
                 writer,
                 "{s}{}{s:#} solved in {}{sep}{}{sep}{}",
-                theme.check(),
+                theme.glyphs.check,
                 format_elapsed(stats.elapsed),
                 describe_count(actions.shifts(), "push", "pushes"),
                 describe_count(actions.moves(), "move", "moves"),
@@ -123,30 +145,20 @@ pub fn solve_detail(
                 s = theme.value
             )?;
         }
-        SolveStatus::NoSolution => {
+        SolveOutcome::NoSolution { .. } => {
             writeln!(
                 writer,
                 "{s}{}{s:#} no solution",
-                theme.cross(),
+                theme.glyphs.cross,
                 s = theme.error
             )?;
         }
-        SolveStatus::Timeout => {
-            let budget = budget.map_or_else(
-                || {
-                    format_elapsed(
-                        report
-                            .stats
-                            .expect("timed out levels carry statistics")
-                            .elapsed,
-                    )
-                },
-                format_budget,
-            );
+        SolveOutcome::Timeout { stats } => {
+            let budget = budget.map_or_else(|| format_elapsed(stats.elapsed), format_budget);
             writeln!(
                 writer,
                 "{s}{}{s:#} timeout after {budget}",
-                theme.timeout(),
+                theme.glyphs.timeout,
                 s = theme.warning
             )?;
         }
@@ -170,25 +182,33 @@ pub fn solve_table(ui: &mut Ui, reports: &[LevelReport<'_>]) -> io::Result<()> {
         Column::new("Time", Align::Right),
     ]);
     for report in reports {
-        let pushes = report
-            .actions
-            .map_or_else(|| "-".to_string(), |actions| actions.shifts().to_string());
-        let moves = report
-            .actions
-            .map_or_else(|| "-".to_string(), |actions| actions.moves().to_string());
-        let nodes = report
-            .stats
-            .map_or_else(|| "-".to_string(), |stats| format_count(stats.expansions));
-        let time = report
-            .stats
-            .map_or_else(|| "-".to_string(), |stats| format_elapsed(stats.elapsed));
+        let (status_text, status_style, pushes, moves) = match report.outcome {
+            SolveOutcome::AlreadySolved => (
+                "already solved",
+                theme.success_muted,
+                "-".to_string(),
+                "-".to_string(),
+            ),
+            SolveOutcome::Solved { actions, .. } => (
+                "solved",
+                theme.success,
+                actions.shifts().to_string(),
+                actions.moves().to_string(),
+            ),
+            SolveOutcome::NoSolution { .. } => {
+                ("unsolved", theme.error, "-".to_string(), "-".to_string())
+            }
+            SolveOutcome::Timeout { .. } => {
+                ("timeout", theme.warning, "-".to_string(), "-".to_string())
+            }
+        };
+        let stats = report.outcome.stats();
+        let nodes = stats.map_or_else(|| "-".to_string(), |stats| format_count(stats.expansions));
+        let time = stats.map_or_else(|| "-".to_string(), |stats| format_elapsed(stats.elapsed));
         table.push_row([
             Cell::new(report.number.to_string()),
             Cell::new(report.title),
-            Cell::styled(
-                status_text(report.status),
-                status_style(report.status, &theme),
-            ),
+            Cell::styled(status_text, status_style),
             Cell::new(pushes),
             Cell::new(moves),
             Cell::new(nodes),
@@ -204,7 +224,7 @@ pub fn solve_summary(ui: &mut Ui, summary: &SolveSummary) -> io::Result<()> {
         return Ok(());
     }
     let style = ui.theme().muted;
-    let sep = ui.theme().separator();
+    let sep = ui.theme().glyphs.separator;
     let levels = if summary.processed < summary.total {
         format!("{} of {} levels", summary.processed, summary.total)
     } else {
@@ -227,30 +247,40 @@ pub fn solve_summary(ui: &mut Ui, summary: &SolveSummary) -> io::Result<()> {
 /// Writes a bordered map block to stdout.
 fn write_map_block(writer: &mut dyn io::Write, map: &Map, theme: &Theme) -> io::Result<()> {
     let width = usize::try_from(map.dimensions().x).unwrap_or(0);
-    let horizontal = theme.horizontal().to_string().repeat(width + 2);
+    let horizontal = theme.glyphs.horizontal.to_string().repeat(width + 2);
 
     writeln!(
         writer,
         "{s}{}{horizontal}{}{s:#}",
-        theme.top_left(),
-        theme.top_right(),
+        theme.glyphs.top_left,
+        theme.glyphs.top_right,
         s = theme.border
     )?;
     for y in 0..map.dimensions().y {
-        write!(writer, "{s}{}{s:#} ", theme.vertical(), s = theme.border)?;
+        write!(
+            writer,
+            "{s}{}{s:#} ",
+            theme.glyphs.vertical,
+            s = theme.border
+        )?;
         for x in 0..map.dimensions().x {
             match tile_display(map[Point::new(x, y)], theme) {
                 Some((glyph, style)) => write!(writer, "{style}{glyph}{style:#}")?,
                 None => write!(writer, " ")?,
             }
         }
-        writeln!(writer, " {s}{}{s:#}", theme.vertical(), s = theme.border)?;
+        writeln!(
+            writer,
+            " {s}{}{s:#}",
+            theme.glyphs.vertical,
+            s = theme.border
+        )?;
     }
     writeln!(
         writer,
         "{s}{}{horizontal}{}{s:#}",
-        theme.bottom_left(),
-        theme.bottom_right(),
+        theme.glyphs.bottom_left,
+        theme.glyphs.bottom_right,
         s = theme.border
     )
 }
@@ -275,26 +305,6 @@ fn tile_display(tiles: Tiles, theme: &Theme) -> Option<(char, Style)> {
         Some(('#', theme.wall))
     } else {
         None
-    }
-}
-
-/// Returns the status text of a level.
-const fn status_text(status: SolveStatus) -> &'static str {
-    match status {
-        SolveStatus::AlreadySolved => "already solved",
-        SolveStatus::Solved => "solved",
-        SolveStatus::NoSolution => "unsolved",
-        SolveStatus::Timeout => "timeout",
-    }
-}
-
-/// Returns the status style of a level.
-const fn status_style(status: SolveStatus, theme: &Theme) -> Style {
-    match status {
-        SolveStatus::AlreadySolved => theme.success_muted,
-        SolveStatus::Solved => theme.success,
-        SolveStatus::NoSolution => theme.error,
-        SolveStatus::Timeout => theme.warning,
     }
 }
 
@@ -353,24 +363,6 @@ mod tests {
     use super::*;
     use crate::{cli::Format, ui::theme::Glyphs};
 
-    /// Strips SGR escape sequences from rendered output.
-    fn strip_styles(text: &str) -> String {
-        let mut result = String::new();
-        let mut in_escape = false;
-        for char in text.chars() {
-            if in_escape {
-                if char == 'm' {
-                    in_escape = false;
-                }
-            } else if char == '\u{1b}' {
-                in_escape = true;
-            } else {
-                result.push(char);
-            }
-        }
-        result
-    }
-
     #[test]
     fn renders_empty_tiles_as_spaces() {
         let map: Map = "######\n#@$  #\n#   .#\n######"
@@ -379,7 +371,8 @@ mod tests {
         let theme = Theme::new(Glyphs::Unicode);
         let mut buffer = Vec::new();
         write_map_block(&mut buffer, &map, &theme).expect("writing to a buffer succeeds");
-        let text = strip_styles(&String::from_utf8(buffer).expect("valid UTF-8"));
+        let raw = String::from_utf8(buffer).expect("valid UTF-8");
+        let text = console::strip_ansi_codes(&raw);
         assert!(text.contains("│ #@$  # │"));
         assert!(text.contains("│ #   .# │"));
         assert!(!text.contains('_'), "floor glyphs must be hidden");
